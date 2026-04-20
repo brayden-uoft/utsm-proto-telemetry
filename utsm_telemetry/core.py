@@ -1,7 +1,9 @@
 """Core helpers shared across the UTSM telemetry toolchain.
 
 Extracted from gps_current_heatmap.py so that analyze_strategy.py (and
-any future scripts) can import them without duplicating logic.
+any future scripts) can import them without duplicating logic. 
+
+Does this actually work? God only knows.
 """
 
 from __future__ import annotations
