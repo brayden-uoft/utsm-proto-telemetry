@@ -25,6 +25,7 @@ from utsm_telemetry import (
     build_strategy_report,
     build_strategy_samples,
     build_strategy_segments,
+    build_strategy_segments_by_distance,
     derive_motion_energy,
     evaluate_baseline_prediction,
     fit_empirical_energy_model,
@@ -41,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("gps", help="Path to the GPX track file")
     parser.add_argument("telemetry", help="Path to the telemetry CSV file")
-    parser.add_argument("--laps", type=int, default=4)
+    parser.add_argument("--laps", type=int, default=3)
     parser.add_argument(
         "--split-method",
         choices=["points", "time", "line", "start"],
@@ -62,7 +63,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imu-axis-sign", type=int, choices=[-1, 1], default=1)
     parser.add_argument("--accel-bias-window-sec", type=float, default=30.0)
     parser.add_argument("--accel-smooth-window-sec", type=float, default=8.0)
-    parser.add_argument("--segments", type=int, default=24)
+    parser.add_argument("--segments", type=int, default=None, help="Legacy fixed segment count. Overrides --strategy-step-m when set.")
+    parser.add_argument("--strategy-step-m", type=float, default=50.0)
+    parser.add_argument("--time-tolerance-pct", type=float, default=3.0)
     parser.add_argument("--time-budget-sec", type=float, default=2100.0)
     parser.add_argument("--lap-time-target-sec", type=float)
     parser.add_argument("--speed-min-kph", type=float, default=8.0)
@@ -182,7 +185,10 @@ def main() -> int:
     full_run = load_full_run(args)
     train_run = full_run[full_run["telemetry_available"]].copy()
     model = fit_empirical_energy_model(train_run if not train_run.empty else full_run)
-    segments_df = build_strategy_segments(full_run, args.segments)
+    if args.segments is not None:
+        segments_df = build_strategy_segments(full_run, args.segments)
+    else:
+        segments_df = build_strategy_segments_by_distance(full_run, args.strategy_step_m)
     motor_config = build_motor_config(
         wheel_diameter_m=args.wheel_diameter_m,
         vehicle_mass_kg=args.vehicle_mass_kg,
@@ -200,8 +206,12 @@ def main() -> int:
     baseline_time_s = float(pd.to_numeric(full_run["dt_s"], errors="coerce").fillna(0.0).sum())
     if args.lap_time_target_sec is not None and args.laps > 0:
         time_budget_sec = args.lap_time_target_sec * args.laps
+        time_target_sec = time_budget_sec
     else:
-        time_budget_sec = args.time_budget_sec if args.time_budget_sec is not None else baseline_time_s
+        time_target_sec = baseline_time_s
+        configured_budget = args.time_budget_sec if args.time_budget_sec is not None else baseline_time_s
+        time_budget_sec = min(configured_budget, baseline_time_s * (1.0 + args.time_tolerance_pct / 100.0))
+    min_time_sec = max(time_target_sec * (1.0 - args.time_tolerance_pct / 100.0), 1.0)
 
     profile_df = optimize_speed_profile(
         segments_df,
@@ -217,6 +227,7 @@ def main() -> int:
         current_penalty_weight=args.current_penalty_weight,
         motor_config=motor_config,
         start_speed_kph=args.start_speed_kph,
+        min_time_sec=min_time_sec,
     )
     samples_df = build_strategy_samples(full_run, profile_df)
     report = build_strategy_report(full_run, profile_df, time_budget_sec, calibration=calibration)

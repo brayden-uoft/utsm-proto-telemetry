@@ -33,6 +33,7 @@ from utsm_telemetry.core import (
 from utsm_telemetry.simulation import (
     build_strategy_report,
     build_strategy_segments,
+    build_strategy_segments_by_distance,
     build_strategy_samples,
     build_motor_config,
     classify_strategy_action,
@@ -480,6 +481,11 @@ class TestSimulation(unittest.TestCase):
         self.assertIn("pred_current_mA", profile.columns)
         self.assertIn("pred_peak_current_mA", profile.columns)
         self.assertIn("throttle_duty", profile.columns)
+        self.assertIn("throttle_level", profile.columns)
+        self.assertIn("pulse_duration_s", profile.columns)
+        self.assertIn("coast_duration_s", profile.columns)
+        self.assertTrue((profile.loc[profile["action"] == "coast", "pred_current_mA"] == 0.0).all())
+        self.assertTrue((profile.loc[profile["action"] != "coast", "pulse_duration_s"] >= 0.0).all())
         self.assertTrue(np.isfinite(profile["pred_energy_j"].sum()))
         self.assertGreater(profile["pred_energy_j"].iloc[0], 0.0)
 
@@ -531,6 +537,53 @@ class TestSimulation(unittest.TestCase):
         self.assertTrue((profile["pred_current_mA"] == 0.0).all())
         self.assertTrue((profile["pred_power_w"] == 0.0).all())
         self.assertTrue((profile["pred_energy_j"] == 0.0).all())
+
+    def test_distance_step_segments_are_short(self):
+        df = pd.DataFrame({
+            "time": pd.date_range("2026-04-11T12:00:00Z", periods=8, freq="1s"),
+            "dt_s": [1.0] * 8,
+            "dist_m": [25.0] * 8,
+            "run_cumdist_m": np.arange(1, 9) * 25.0,
+            "grade_pct": [0.0] * 8,
+            "speed_kph": [18.0] * 8,
+            "gps_longitudinal_accel_m_s2": [0.0] * 8,
+            "current_mA": [1000.0] * 8,
+            "power_w": [24.0] * 8,
+            "energy_j": [24.0] * 8,
+            "cum_energy_j": np.arange(1, 9) * 24.0,
+        })
+        segments = build_strategy_segments_by_distance(df, strategy_step_m=50.0)
+        self.assertEqual(len(segments), 4)
+        self.assertLessEqual(float(segments["length_m"].max()), 50.0 + 1e-9)
+
+    def test_coast_model_uses_low_current_deceleration(self):
+        rows = []
+        run_dist = 0.0
+        run_energy = 0.0
+        for i in range(30):
+            dt_s = 1.0
+            speed = max(5.0, 30.0 - i * 0.6)
+            accel = -0.22 if i % 2 else -0.18
+            current = 50.0 if i < 20 else 4500.0
+            power = current / 1000.0 * 24.0
+            run_dist += speed / 3.6
+            run_energy += power
+            rows.append({
+                "time": pd.Timestamp("2026-04-11T12:00:00Z") + pd.Timedelta(seconds=i),
+                "dt_s": dt_s,
+                "dist_m": speed / 3.6,
+                "run_cumdist_m": run_dist,
+                "grade_pct": 0.0,
+                "speed_kph": speed,
+                "gps_longitudinal_accel_m_s2": accel,
+                "current_mA": current,
+                "voltage_mV": 24000.0,
+                "power_w": power,
+                "energy_j": power,
+                "cum_energy_j": run_energy,
+            })
+        model = fit_empirical_energy_model(pd.DataFrame(rows))
+        self.assertGreaterEqual(model["coast_sample_count"], 8)
 
     def test_infer_gear_ratio_from_top_speed(self):
         ratio = infer_gear_ratio(top_speed_kph=39.0, motor_top_rpm=7560.0, wheel_diameter_m=0.50)
@@ -659,10 +712,14 @@ class TestSimulation(unittest.TestCase):
         self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["targetSpeed"], 19.0)
         self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["predRunEnergyJ"], 95.0)
         self.assertEqual(payload["runs"]["afternoon"]["samples"][2]["strategyAction"], "accelerate")
-        self.assertEqual(len(payload["runs"]["afternoon"]["segments"]), 2)
+        self.assertGreaterEqual(len(payload["runs"]["afternoon"]["segments"]), 1)
+        self.assertIn("internal_start_segment", payload["runs"]["afternoon"]["segments"][0])
         self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["predCurrent"], 95.0)
         self.assertIn("predPeakCurrent", payload["runs"]["afternoon"]["samples"][0])
+        self.assertIn("pulseDuration", payload["runs"]["afternoon"]["samples"][0])
+        self.assertIn("coastDuration", payload["runs"]["afternoon"]["samples"][0])
         self.assertIn("motor", payload["runs"]["afternoon"]["strategy"])
+        self.assertIn("total_coast_time_s", payload["runs"]["afternoon"]["strategy"])
         self.assertIn("start_speed_kph", payload["runs"]["afternoon"]["strategy"])
         self.assertIn("strategyLegend", payload)
         self.assertIn("accelerate", payload["strategyLegend"])

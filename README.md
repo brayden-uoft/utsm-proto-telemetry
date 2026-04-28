@@ -47,20 +47,20 @@ The main dashboard now packages both known April 11 runs:
 - `Utsm.gpx` + `telemetry_dumps\telemetry_20260411_112302.csv`
 - `Utsm-2.gpx` + `telemetry_dumps\telemetry_20260411_122713.csv`
 
-Use `--laps 4 --split-method start` as the standard replay/strategy path. The start split uses a localized left-side start/finish gate and rejects the false right-side same-Y crossing.
+Use `--laps 3 --split-method start` as the standard replay/strategy path. The fourth recorded pass is currently treated as unreliable for strategy work, so the dashboard and simulator default to the first three clean laps.
 
 ## Interactive Dashboard
 
 Build the dashboard:
 
 ```powershell
-python build_interactive_dashboard.py --laps 4 --output outputs\telemetry_strategy_dashboard.html
+python build_interactive_dashboard.py --laps 3 --output outputs\telemetry_strategy_dashboard.html
 ```
 
 Useful strategy knobs:
 
 ```powershell
-python build_interactive_dashboard.py --laps 4 --strategy-segments 24 --strategy-time-budget-sec 2100 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output outputs\telemetry_strategy_dashboard.html
+python build_interactive_dashboard.py --laps 3 --strategy-step-m 50 --display-region-min-m 150 --strategy-time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output outputs\telemetry_strategy_dashboard.html
 ```
 
 Open `outputs\telemetry_strategy_dashboard.html` in a browser. It is a self-contained HTML file with:
@@ -76,6 +76,7 @@ Open `outputs\telemetry_strategy_dashboard.html` in a browser. It is a self-cont
 - current, speed, power, and cumulative-energy prediction overlays
 - visible `20 A` fuse threshold on the current chart
 - map mode switch between action-region view and metric-colored trail view
+- merged strategy labels, while the underlying optimizer can switch actions every `50 m`
 
 The strategy layer uses the same optimized profile as `simulate_speed_strategy.py`. In the dashboard:
 
@@ -96,14 +97,14 @@ The dashboard payload also includes MPU axis/sign diagnostic correlations for `a
 
 The total-energy chart is cumulative run joules versus elapsed time. It spans the whole run and does not reset at lap boundaries.
 
-For the morning run, the telemetry capture ends before the fourth lap finishes. The dashboard keeps that lap in the replay using GPS-backed samples with zeroed telemetry channels so the 4-lap strategy view remains complete.
+For the morning run, later samples can become telemetry-sparse. The standard 3-lap workflow avoids the broken fourth-lap interpretation for now.
 
 ## Strategy Analysis
 
 Run the corrected afternoon analysis:
 
 ```powershell
-python analyze_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 4 --split-method start --output-prefix outputs\afternoon_clean_demo
+python analyze_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --output-prefix outputs\afternoon_clean_demo
 ```
 
 This writes:
@@ -129,7 +130,7 @@ The analysis computes:
 Run the empirical 3-state optimizer:
 
 ```powershell
-python simulate_speed_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 4 --split-method start --segments 24 --time-budget-sec 2100 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
+python simulate_speed_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --strategy-step-m 50 --time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
 ```
 
 This writes:
@@ -140,7 +141,7 @@ This writes:
 
 The dashboard generator runs the same optimizer internally so the HTML stays in sync with the standalone strategy report.
 
-The current optimizer is empirical and deterministic. It fits current and power models from historical samples, simulates explicit `accelerate` / `hold` / `coast` behavior by equal-distance segment, minimizes predicted joules, keeps total time under the configured budget, and rejects strategies that stay above the fuse current threshold for too long.
+The current optimizer is empirical and deterministic. It fits current and power models from historical samples, simulates explicit `accelerate` / pulse-and-coast `hold` / zero-throttle `coast` behavior by short equal-distance segment, minimizes predicted joules near the recorded 3-lap pace, and rejects strategies that stay above the fuse current threshold for too long. `--segments` is still accepted as a legacy fixed-count override, but `--strategy-step-m 50` is the default path because the driver can change accel/hold/coast state within `100 m`.
 
 ## Optional Animation Fallback
 
@@ -164,16 +165,16 @@ python dumper.py --port COM13
 Generate legacy current heatmaps:
 
 ```powershell
-python gps_current_heatmap.py Utsm.gpx telemetry_dumps\telemetry_20260411_112302.csv --laps 4 --split-method start --output outputs\current_heatmap.png
+python gps_current_heatmap.py Utsm.gpx telemetry_dumps\telemetry_20260411_112302.csv --laps 3 --split-method start --output outputs\current_heatmap.png
 ```
 
 Run smoke tests and regenerate the multi-run dashboard:
 
 ```powershell
 python tests\test_smoke.py
-python build_interactive_dashboard.py --laps 4 --output outputs\telemetry_strategy_dashboard.html
-python analyze_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 4 --split-method start --output-prefix outputs\afternoon_clean_demo
-python simulate_speed_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 4 --split-method start --segments 24 --time-budget-sec 2100 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
+python build_interactive_dashboard.py --laps 3 --strategy-step-m 50 --output outputs\telemetry_strategy_dashboard.html
+python analyze_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --output-prefix outputs\afternoon_clean_demo
+python simulate_speed_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --strategy-step-m 50 --time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
 ```
 
 ## Notes And Limits

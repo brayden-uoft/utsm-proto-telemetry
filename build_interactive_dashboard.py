@@ -30,6 +30,7 @@ from utsm_telemetry import (
     build_strategy_report,
     build_strategy_samples,
     build_strategy_segments,
+    build_strategy_segments_by_distance,
     compute_accel_candidate_scores,
     derive_motion_energy,
     evaluate_baseline_prediction,
@@ -101,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gps")
     parser.add_argument("--telemetry")
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT)
-    parser.add_argument("--laps", type=int, default=4)
+    parser.add_argument("--laps", type=int, default=3)
     parser.add_argument(
         "--split-method",
         choices=["points", "time", "line", "start"],
@@ -118,13 +119,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imu-axis-sign", type=int, choices=[-1, 1], default=1)
     parser.add_argument("--accel-bias-window-sec", type=float, default=30.0)
     parser.add_argument("--accel-smooth-window-sec", type=float, default=8.0)
-    parser.add_argument("--strategy-segments", type=int, default=24)
+    parser.add_argument("--strategy-segments", type=int, default=None, help="Legacy fixed segment count. Overrides --strategy-step-m when set.")
+    parser.add_argument("--strategy-step-m", type=float, default=50.0)
+    parser.add_argument("--display-region-min-m", type=float, default=150.0)
     parser.add_argument("--strategy-speed-min-kph", type=float, default=8.0)
     parser.add_argument("--strategy-speed-max-kph", type=float, default=40.0)
     parser.add_argument("--strategy-max-delta-kph-per-segment", type=float, default=6.0)
     parser.add_argument("--strategy-speed-step-kph", type=float, default=1.0)
     parser.add_argument("--strategy-hold-delta-kph", type=float, default=1.0)
     parser.add_argument("--strategy-time-budget-sec", type=float, default=2100.0)
+    parser.add_argument("--strategy-time-tolerance-pct", type=float, default=3.0)
     parser.add_argument("--fuse-current-ma", type=float, default=20000.0)
     parser.add_argument("--fuse-max-duration-sec", type=float, default=1.0)
     parser.add_argument("--current-penalty-weight", type=float, default=5.0)
@@ -253,7 +257,10 @@ def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.
 
     train_df = df[df["telemetry_available"]].copy()
     strategy_model = fit_empirical_energy_model(train_df if not train_df.empty else df)
-    strategy_segments = build_strategy_segments(df, args.strategy_segments)
+    if args.strategy_segments is not None:
+        strategy_segments = build_strategy_segments(df, args.strategy_segments)
+    else:
+        strategy_segments = build_strategy_segments_by_distance(df, args.strategy_step_m)
     motor_config = build_motor_config(
         wheel_diameter_m=args.wheel_diameter_m,
         vehicle_mass_kg=args.vehicle_mass_kg,
@@ -267,10 +274,16 @@ def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.
         hold_delta_kph=args.strategy_hold_delta_kph,
         start_speed_kph=args.strategy_start_speed_kph,
     )
+    baseline_time_s = float(pd.to_numeric(df["dt_s"], errors="coerce").fillna(0.0).sum())
+    time_budget_s = min(
+        args.strategy_time_budget_sec,
+        baseline_time_s * (1.0 + args.strategy_time_tolerance_pct / 100.0),
+    )
+    min_time_s = baseline_time_s * (1.0 - args.strategy_time_tolerance_pct / 100.0)
     strategy_profile = optimize_speed_profile(
         strategy_segments,
         strategy_model,
-        time_budget_sec=args.strategy_time_budget_sec,
+        time_budget_sec=time_budget_s,
         speed_min_kph=args.strategy_speed_min_kph,
         speed_max_kph=args.strategy_speed_max_kph,
         max_delta_kph_per_segment=args.strategy_max_delta_kph_per_segment,
@@ -281,11 +294,12 @@ def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.
         current_penalty_weight=args.current_penalty_weight,
         motor_config=motor_config,
         start_speed_kph=args.strategy_start_speed_kph,
+        min_time_sec=min_time_s,
     )
     strategy_report = build_strategy_report(
         df,
         strategy_profile,
-        args.strategy_time_budget_sec,
+        time_budget_s,
         calibration=calibration,
     )
     aligned = build_strategy_samples(df, strategy_profile).reset_index(drop=True)
@@ -298,7 +312,11 @@ def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.
     df["pred_peak_current_mA"] = aligned["pred_peak_current_mA"]
     df["pred_on_current_mA"] = aligned["pred_on_current_mA"]
     df["throttle_duty"] = aligned["throttle_duty"]
+    df["throttle_level"] = aligned["throttle_level"]
     df["pred_power_w"] = aligned["pred_power_w"]
+    df["pulse_duration_s"] = aligned["pulse_duration_s"]
+    df["coast_duration_s"] = aligned["coast_duration_s"]
+    df["coast_speed_drop_kph"] = aligned["coast_speed_drop_kph"]
     df["pred_energy_j"] = aligned["pred_energy_j"]
     df["pred_cum_energy_j"] = aligned["pred_cum_energy_j"]
     df["pred_over_fuse_limit"] = aligned["pred_over_fuse_limit"]
@@ -339,6 +357,94 @@ def domain(
     return [round(lower, 3), round(hi + pad, 3)]
 
 
+def build_display_regions(
+    df: pd.DataFrame,
+    strategy_profile: pd.DataFrame,
+    min_region_m: float,
+) -> list[dict[str, Any]]:
+    df = df.copy()
+    if "run_cumdist_m" not in df.columns:
+        if "dist_m" in df.columns:
+            df = build_full_run_distance(df)
+        elif {"x", "y"}.issubset(df.columns):
+            dx = pd.to_numeric(df["x"], errors="coerce").diff().fillna(0.0)
+            dy = pd.to_numeric(df["y"], errors="coerce").diff().fillna(0.0)
+            df["run_cumdist_m"] = np.sqrt(dx * dx + dy * dy).cumsum()
+        else:
+            df["run_cumdist_m"] = np.arange(len(df), dtype=float)
+    min_region_m = max(float(min_region_m), 1.0)
+    regions = []
+    current_rows = []
+    current_action = None
+    current_length = 0.0
+
+    for row in strategy_profile.itertuples(index=False):
+        action = str(row.action)
+        length = float(getattr(row, "length_m", float(row.dist_end_m) - float(row.dist_start_m)))
+        if current_rows and action != current_action and current_length >= min_region_m:
+            regions.append(_make_display_region(df, current_rows, len(regions) + 1))
+            current_rows = []
+            current_length = 0.0
+        current_rows.append(row)
+        current_action = action
+        current_length += length
+    if current_rows:
+        regions.append(_make_display_region(df, current_rows, len(regions) + 1))
+    return regions
+
+
+def _make_display_region(df: pd.DataFrame, rows: list[Any], display_segment: int) -> dict[str, Any]:
+    first = rows[0]
+    last = rows[-1]
+    dist_start = float(first.dist_start_m)
+    dist_end = float(last.dist_end_m)
+    seg_rows = df[(df["run_cumdist_m"] >= dist_start) & (df["run_cumdist_m"] <= dist_end)]
+    mid = seg_rows.iloc[len(seg_rows) // 2] if not seg_rows.empty else None
+    label_dx_m = None
+    label_dy_m = None
+    if len(seg_rows) >= 3:
+        mid_idx = len(seg_rows) // 2
+        before = seg_rows.iloc[max(mid_idx - 2, 0)]
+        after = seg_rows.iloc[min(mid_idx + 2, len(seg_rows) - 1)]
+        tx = float(after["x"] - before["x"])
+        ty = float(after["y"] - before["y"])
+        norm = math.hypot(tx, ty)
+        if norm > 0:
+            side = -1.0 if display_segment % 2 else 1.0
+            label_dx_m = side * (-ty / norm) * 28.0
+            label_dy_m = side * (tx / norm) * 28.0
+    length_m = sum(float(getattr(row, "length_m", float(row.dist_end_m) - float(row.dist_start_m))) for row in rows)
+    action_counts = pd.Series([str(row.action) for row in rows]).value_counts()
+    action = str(action_counts.index[0])
+    return {
+        "segment": int(display_segment),
+        "internal_start_segment": int(first.segment),
+        "internal_end_segment": int(last.segment),
+        "lap": int(mid["lap"]) if mid is not None else None,
+        "label_x": finite_float(mid["x"], 2) if mid is not None else None,
+        "label_y": finite_float(mid["y"], 2) if mid is not None else None,
+        "label_dx_m": finite_float(label_dx_m, 2),
+        "label_dy_m": finite_float(label_dy_m, 2),
+        "dist_start_m": finite_float(dist_start, 2),
+        "dist_end_m": finite_float(dist_end, 2),
+        "length_m": finite_float(length_m, 2),
+        "target_speed_kph": finite_float(float(last.target_speed_kph), 2),
+        "entry_speed_kph": finite_float(float(first.entry_speed_kph), 2),
+        "speed_delta_kph": finite_float(float(last.target_speed_kph) - float(first.entry_speed_kph), 2),
+        "pred_current_mA": finite_float(np.mean([float(row.pred_current_mA) for row in rows]), 0),
+        "pred_peak_current_mA": finite_float(max(float(row.pred_peak_current_mA) for row in rows), 0),
+        "pred_on_current_mA": finite_float(max(float(row.pred_on_current_mA) for row in rows), 0),
+        "throttle_duty": finite_float(np.mean([float(row.throttle_duty) for row in rows]), 3),
+        "throttle_level": finite_float(np.mean([float(row.throttle_level) for row in rows]), 3),
+        "pulse_duration_s": finite_float(sum(float(getattr(row, "pulse_duration_s", 0.0)) for row in rows), 2),
+        "coast_duration_s": finite_float(sum(float(getattr(row, "coast_duration_s", 0.0)) for row in rows), 2),
+        "pred_power_w": finite_float(np.mean([float(row.pred_power_w) for row in rows]), 2),
+        "pred_energy_j": finite_float(sum(float(row.pred_energy_j) for row in rows), 2),
+        "action": action,
+        "over_fuse_limit": bool(any(bool(row.over_fuse_limit) for row in rows)),
+    }
+
+
 def make_run_payload(
     spec: dict[str, str],
     df: pd.DataFrame,
@@ -355,6 +461,14 @@ def make_run_payload(
         df["pred_on_current_mA"] = df["pred_current_mA"]
     if "throttle_duty" not in df.columns:
         df["throttle_duty"] = 0.0
+    if "throttle_level" not in df.columns:
+        df["throttle_level"] = df["throttle_duty"]
+    if "pulse_duration_s" not in df.columns:
+        df["pulse_duration_s"] = 0.0
+    if "coast_duration_s" not in df.columns:
+        df["coast_duration_s"] = 0.0
+    if "coast_speed_drop_kph" not in df.columns:
+        df["coast_speed_drop_kph"] = 0.0
     strategy_profile = strategy_profile.copy()
     for col, fallback in (
         ("pred_avg_current_mA", "pred_current_mA"),
@@ -365,6 +479,19 @@ def make_run_payload(
             strategy_profile[col] = strategy_profile[fallback]
     if "throttle_duty" not in strategy_profile.columns:
         strategy_profile["throttle_duty"] = 0.0
+    if "throttle_level" not in strategy_profile.columns:
+        strategy_profile["throttle_level"] = strategy_profile["throttle_duty"]
+    if "pulse_duration_s" not in strategy_profile.columns:
+        strategy_profile["pulse_duration_s"] = 0.0
+    if "coast_duration_s" not in strategy_profile.columns:
+        strategy_profile["coast_duration_s"] = 0.0
+    if "coast_speed_drop_kph" not in strategy_profile.columns:
+        strategy_profile["coast_speed_drop_kph"] = 0.0
+    if "length_m" not in strategy_profile.columns:
+        strategy_profile["length_m"] = (
+            pd.to_numeric(strategy_profile["dist_end_m"], errors="coerce")
+            - pd.to_numeric(strategy_profile["dist_start_m"], errors="coerce")
+        ).fillna(0.0)
     samples = []
     for row in df.itertuples(index=False):
         samples.append({
@@ -378,12 +505,16 @@ def make_run_payload(
             "predPeakCurrent": finite_float(row.pred_peak_current_mA, 0),
             "predOnCurrent": finite_float(row.pred_on_current_mA, 0),
             "throttleDuty": finite_float(row.throttle_duty, 3),
+            "throttleLevel": finite_float(row.throttle_level, 3),
             "speed": finite_float(row.speed_kph, 2),
             "targetSpeed": finite_float(row.target_speed_kph, 2),
             "gpsAccel": finite_float(row.gps_longitudinal_accel_abs_m_s2, 3),
             "imuAccel": finite_float(row.imu_forward_dynamic_m_s2, 3),
             "power": finite_float(row.power_w, 2),
             "predPower": finite_float(row.pred_power_w, 2),
+            "pulseDuration": finite_float(row.pulse_duration_s, 2),
+            "coastDuration": finite_float(row.coast_duration_s, 2),
+            "coastSpeedDrop": finite_float(row.coast_speed_drop_kph, 2),
             "runEnergyJ": finite_float(row.cum_energy_j, 2),
             "predRunEnergyJ": finite_float(row.pred_cum_energy_j, 2),
             "strategyAction": str(row.strategy_action),
@@ -433,44 +564,11 @@ def make_run_payload(
             "end_t": finite_float(group["elapsed_s"].iloc[-1], 2),
         })
 
-    segments = []
-    for row in strategy_profile.itertuples(index=False):
-        seg_rows = df[df["segment"] == row.segment]
-        mid = seg_rows.iloc[len(seg_rows) // 2] if not seg_rows.empty else None
-        label_dx_m = None
-        label_dy_m = None
-        if len(seg_rows) >= 3:
-            mid_idx = len(seg_rows) // 2
-            before = seg_rows.iloc[max(mid_idx - 2, 0)]
-            after = seg_rows.iloc[min(mid_idx + 2, len(seg_rows) - 1)]
-            tx = float(after["x"] - before["x"])
-            ty = float(after["y"] - before["y"])
-            norm = math.hypot(tx, ty)
-            if norm > 0:
-                side = -1.0 if int(row.segment) % 2 else 1.0
-                label_dx_m = side * (-ty / norm) * 28.0
-                label_dy_m = side * (tx / norm) * 28.0
-        segments.append({
-            "segment": int(row.segment),
-            "lap": int(mid["lap"]) if mid is not None else None,
-            "label_x": finite_float(mid["x"], 2) if mid is not None else None,
-            "label_y": finite_float(mid["y"], 2) if mid is not None else None,
-            "label_dx_m": finite_float(label_dx_m, 2),
-            "label_dy_m": finite_float(label_dy_m, 2),
-            "dist_start_m": finite_float(row.dist_start_m, 2),
-            "dist_end_m": finite_float(row.dist_end_m, 2),
-            "target_speed_kph": finite_float(row.target_speed_kph, 2),
-            "entry_speed_kph": finite_float(row.entry_speed_kph, 2),
-            "speed_delta_kph": finite_float(row.speed_delta_kph, 2),
-            "pred_current_mA": finite_float(row.pred_current_mA, 0),
-            "pred_peak_current_mA": finite_float(row.pred_peak_current_mA, 0),
-            "pred_on_current_mA": finite_float(row.pred_on_current_mA, 0),
-            "throttle_duty": finite_float(row.throttle_duty, 3),
-            "pred_power_w": finite_float(row.pred_power_w, 2),
-            "pred_energy_j": finite_float(row.pred_energy_j, 2),
-            "action": str(row.action),
-            "over_fuse_limit": bool(row.over_fuse_limit),
-        })
+    segments = build_display_regions(
+        df,
+        strategy_profile,
+        getattr(args, "display_region_min_m", 150.0),
+    )
 
     total_over = float(pd.to_numeric(strategy_profile["fuse_over_duration_s"], errors="coerce").fillna(0.0).sum())
     longest_over = longest_true_duration(
@@ -481,6 +579,16 @@ def make_run_payload(
     predicted_energy = float(pd.to_numeric(strategy_profile["pred_energy_j"], errors="coerce").fillna(0.0).sum())
     baseline_time = float(pd.to_numeric(df["dt_s"], errors="coerce").fillna(0.0).sum())
     predicted_time = float(pd.to_numeric(strategy_profile["segment_time_s"], errors="coerce").fillna(0.0).sum())
+    total_coast_time = float(pd.to_numeric(strategy_profile["coast_duration_s"], errors="coerce").fillna(0.0).sum())
+    total_coast_dist = float(strategy_profile.loc[strategy_profile["coast_duration_s"] > 0, "length_m"].sum())
+    pulse_count = int((pd.to_numeric(strategy_profile["pulse_duration_s"], errors="coerce").fillna(0.0) > 0).sum())
+    avg_pulse_duration = float(
+        pd.to_numeric(strategy_profile.loc[strategy_profile["pulse_duration_s"] > 0, "pulse_duration_s"], errors="coerce")
+        .dropna()
+        .mean()
+    )
+    if not math.isfinite(avg_pulse_duration):
+        avg_pulse_duration = 0.0
     motor_config = strategy_profile.attrs.get("motor_config", {}) or build_motor_config(
         getattr(args, "wheel_diameter_m", 0.50)
     )
@@ -520,7 +628,8 @@ def make_run_payload(
             "metrics": metric_domains,
         },
         "strategy": {
-            "time_budget_s": finite_float(args.strategy_time_budget_sec, 2),
+            "time_budget_s": finite_float(strategy_profile.attrs.get("time_budget_sec", args.strategy_time_budget_sec), 2),
+            "min_time_s": finite_float(strategy_profile.attrs.get("min_time_sec"), 2),
             "baseline_energy_j": finite_float(baseline_energy, 2),
             "predicted_energy_j": finite_float(predicted_energy, 2),
             "delta_energy_j": finite_float(predicted_energy - baseline_energy, 2),
@@ -530,6 +639,16 @@ def make_run_payload(
             ),
             "baseline_time_s": finite_float(baseline_time, 2),
             "predicted_time_s": finite_float(predicted_time, 2),
+            "time_error_pct": finite_float(
+                ((predicted_time - baseline_time) / baseline_time * 100.0) if baseline_time > 0 else 0.0,
+                2,
+            ),
+            "total_coast_time_s": finite_float(total_coast_time, 2),
+            "total_coast_distance_m": finite_float(total_coast_dist, 2),
+            "pulse_count": pulse_count,
+            "avg_pulse_duration_s": finite_float(avg_pulse_duration, 2),
+            "strategy_step_m": finite_float(getattr(args, "strategy_step_m", None), 2),
+            "display_region_min_m": finite_float(getattr(args, "display_region_min_m", None), 2),
             "total_over_fuse_s": finite_float(total_over, 2),
             "longest_over_fuse_s": finite_float(longest_over, 2),
             "fuse_current_ma": finite_float(args.fuse_current_ma, 0),
@@ -557,7 +676,7 @@ def make_run_payload(
 
 def make_payload(run_payloads: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "title": "UTSM 4-Lap Strategy Dashboard",
+        "title": "UTSM Strategy Dashboard",
         "defaultRun": run_payloads[0]["id"],
         "runOrder": [run["id"] for run in run_payloads],
         "runs": {run["id"]: run for run in run_payloads},
@@ -602,7 +721,7 @@ def build_html(payload: dict[str, Any]) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UTSM 4-Lap Strategy Dashboard</title>
+  <title>UTSM Strategy Dashboard</title>
   <style>
     :root {{
       font-family: Arial, Helvetica, sans-serif;
@@ -817,7 +936,7 @@ def build_html(payload: dict[str, Any]) -> str:
 </head>
 <body>
   <header>
-    <h1>UTSM 4-Lap Strategy Dashboard</h1>
+    <h1>UTSM Strategy Dashboard</h1>
     <div class="meta" id="metaText"></div>
   </header>
   <main>
@@ -879,9 +998,14 @@ def build_html(payload: dict[str, Any]) -> str:
           <div class="summary-card"><span>Time > 20A</span><strong id="overFuseValue"></strong></div>
           <div class="summary-card"><span>Longest burst</span><strong id="longestFuseValue"></strong></div>
           <div class="summary-card"><span>Pred peak current</span><strong id="peakCurrentValue"></strong></div>
+          <div class="summary-card"><span>Coast time</span><strong id="coastTimeValue"></strong></div>
+          <div class="summary-card"><span>Coast distance</span><strong id="coastDistanceValue"></strong></div>
+          <div class="summary-card"><span>Pulse segments</span><strong id="pulseCountValue"></strong></div>
+          <div class="summary-card"><span>Time error</span><strong id="timeErrorValue"></strong></div>
           <div class="summary-card"><span>Gear estimate</span><strong id="gearValue"></strong></div>
         </div>
         <div class="charts" id="charts"></div>
+        <div class="legend-stack" id="chartLegend"></div>
         <details>
           <summary>Strategy report</summary>
           <pre id="reportText"></pre>
@@ -902,13 +1026,13 @@ def build_html(payload: dict[str, Any]) -> str:
     const CHART_PAD = {{ left: 58, right: 14, top: 14, bottom: 28 }};
     const chartKeys = ["current", "speed", "gpsAccel", "imuAccel", "power", "runEnergyJ"];
     const overlayFields = {{
-      current: {{ field: "predCurrent", color: "#fb7185" }},
-      speed: {{ field: "targetSpeed", color: "#f97316" }},
-      power: {{ field: "predPower", color: "#c084fc" }},
-      runEnergyJ: {{ field: "predRunEnergyJ", color: "#d97706" }}
+      current: {{ field: "predCurrent", color: "#fb7185", label: "Pred avg current" }},
+      speed: {{ field: "targetSpeed", color: "#f97316", label: "Target speed" }},
+      power: {{ field: "predPower", color: "#c084fc", label: "Pred power" }},
+      runEnergyJ: {{ field: "predRunEnergyJ", color: "#d97706", label: "Pred energy" }}
     }};
     const peakOverlayFields = {{
-      current: {{ field: "predPeakCurrent", color: "#ef4444" }}
+      current: {{ field: "predPeakCurrent", color: "#ef4444", label: "Pred peak current" }}
     }};
     const metricSpecs = DATA.metrics;
     const metricKeys = Object.keys(metricSpecs).filter(k => metricSpecs[k].map_selectable !== false);
@@ -940,8 +1064,13 @@ def build_html(payload: dict[str, Any]) -> str:
       overFuseValue: document.getElementById("overFuseValue"),
       longestFuseValue: document.getElementById("longestFuseValue"),
       peakCurrentValue: document.getElementById("peakCurrentValue"),
+      coastTimeValue: document.getElementById("coastTimeValue"),
+      coastDistanceValue: document.getElementById("coastDistanceValue"),
+      pulseCountValue: document.getElementById("pulseCountValue"),
+      timeErrorValue: document.getElementById("timeErrorValue"),
       gearValue: document.getElementById("gearValue"),
       reportText: document.getElementById("reportText"),
+      chartLegend: document.getElementById("chartLegend"),
       strategyLegend: document.getElementById("strategyLegend"),
       metricLegend: document.getElementById("metricLegend"),
       legendTitle: document.getElementById("legendTitle"),
@@ -1224,6 +1353,10 @@ def build_html(payload: dict[str, Any]) -> str:
       el.overFuseValue.textContent = `${{strategy.total_over_fuse_s.toFixed(2)}} s`;
       el.longestFuseValue.textContent = `${{strategy.longest_over_fuse_s.toFixed(2)}} s`;
       el.peakCurrentValue.textContent = `${{(strategy.peak_current_mA / 1000).toFixed(1)}} A`;
+      el.coastTimeValue.textContent = `${{strategy.total_coast_time_s.toFixed(1)}} s`;
+      el.coastDistanceValue.textContent = `${{strategy.total_coast_distance_m.toFixed(0)}} m`;
+      el.pulseCountValue.textContent = `${{strategy.pulse_count}}`;
+      el.timeErrorValue.textContent = `${{strategy.time_error_pct.toFixed(2)}}%`;
       el.gearValue.textContent = `${{strategy.motor.inferred_gear_ratio.toFixed(2)}}:1`;
       el.reportText.textContent = strategy.report;
     }}
@@ -1247,7 +1380,7 @@ def build_html(payload: dict[str, Any]) -> str:
       el.timeText.textContent = `t=${{row.t.toFixed(1)}}s / ${{run.meta.duration_s.toFixed(1)}}s`;
       const metric = metricSpecs[state.metric];
       const metricValue = row[metric.field];
-      el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
+      el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  pulse=${{row.pulseDuration.toFixed(1)}}s coast=${{row.coastDuration.toFixed(1)}}s  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
       el.lapValue.textContent = String(row.lap);
       el.strategyValue.textContent = row.strategyAction;
       el.targetSpeedValue.textContent = format(row.targetSpeed, 1, " km/h");
@@ -1272,6 +1405,12 @@ def build_html(payload: dict[str, Any]) -> str:
         `<span class="legend-item"><span class="legend-swatch" style="--swatch:${{map.reference.color}}"></span>${{map.reference.label}}</span>`
       ];
       el.strategyLegend.innerHTML = [...actionItems, ...mapItems].join("");
+      el.chartLegend.innerHTML = [
+        `<span class="legend-item"><span class="legend-swatch" style="--swatch:#d2d7de"></span>Actual full run</span>`,
+        `<span class="legend-item"><span class="legend-swatch" style="--swatch:${{overlayFields.current.color}}"></span>Predicted average current / predicted overlay</span>`,
+        `<span class="legend-item"><span class="legend-swatch" style="--swatch:${{peakOverlayFields.current.color}}"></span>Predicted peak current spikes</span>`,
+        `<span class="legend-item"><span class="legend-swatch" style="--swatch:#dc2626"></span>20 A fuse threshold</span>`
+      ].join("");
     }}
 
     function animationTick(now) {{
