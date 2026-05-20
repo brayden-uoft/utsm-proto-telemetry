@@ -11,6 +11,10 @@ The current analysis path is centered on:
 
 Generated artifacts are reproducible and ignored by Git. Regenerate reports and dashboards into `outputs/` when needed.
 
+## Strategy Plan
+
+See `PLAN.md` for the current project state, bootcamp alignment, and remaining gaps toward a data-driven Shell Eco-marathon Indianapolis driver strategy. The plan is based on the Schmid Elektronik 2026 bootcamp flow: telemetry, analytics, live data, modelling, and holistic race strategy.
+
 ## Setup
 
 ```powershell
