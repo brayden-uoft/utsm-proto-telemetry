@@ -44,14 +44,27 @@ Some dumps also include `amag_x100`. Despite the column names, the MPU-6050 acce
 
 GPX files must include latitude, longitude, elevation, and timestamps. Speed is derived from GPX point-to-point movement on the GPX sampling clock, not by integrating noisy accelerometer data.
 
-## Canonical Runs
+## Runs
 
-The main dashboard now packages both known April 11 runs:
+The dashboard auto-discovers runs from `data\runs\`. Each run is just a
+subfolder containing exactly one `.gpx` file and one telemetry `.csv` file -
+folder and file names can be anything (e.g. `data\runs\june-20-test\` holding
+`june-20-2026.gpx` and `Telemetry_001.csv`). To add a new run, drop a new
+subfolder in there; no code changes are needed and it will show up in the
+dashboard's run-switcher automatically. The subfolder name becomes the run's
+label (e.g. `june-20-test` -> "June 20 Test").
 
-- `Utsm.gpx` + `telemetry_dumps\telemetry_20260411_112302.csv`
-- `Utsm-2.gpx` + `telemetry_dumps\telemetry_20260411_122713.csv`
+Currently packaged:
+
+- `data\runs\morning-run\` - `Utsm.gpx` + `telemetry_20260411_112302.csv`
+- `data\runs\afternoon-run\` - `Utsm-2.gpx` + `telemetry_20260411_122713.csv`
 
 Use `--laps 3 --split-method start` as the standard replay/strategy path. The fourth recorded pass is currently treated as unreliable for strategy work, so the dashboard and simulator default to the first three clean laps.
+
+To point the dashboard at a different folder of runs, pass `--runs-dir`. To
+build a one-off dashboard from a single pair of files outside that structure,
+pass `--gps` and `--telemetry` directly (this skips auto-discovery and
+produces a single "Custom run" entry).
 
 ## Interactive Dashboard
 
@@ -108,7 +121,7 @@ For the morning run, later samples can become telemetry-sparse. The standard 3-l
 Run the corrected afternoon analysis:
 
 ```powershell
-python analyze_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --output-prefix outputs\afternoon_clean_demo
+python analyze_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\afternoon-run\telemetry_20260411_122713.csv --laps 3 --split-method start --output-prefix outputs\afternoon_clean_demo
 ```
 
 This writes:
@@ -134,7 +147,7 @@ The analysis computes:
 Run the empirical 3-state optimizer:
 
 ```powershell
-python simulate_speed_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --strategy-step-m 50 --time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
+python simulate_speed_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\afternoon-run\telemetry_20260411_122713.csv --laps 3 --split-method start --strategy-step-m 50 --time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
 ```
 
 This writes:
@@ -169,7 +182,7 @@ python dumper.py --port COM13
 Generate legacy current heatmaps:
 
 ```powershell
-python gps_current_heatmap.py Utsm.gpx telemetry_dumps\telemetry_20260411_112302.csv --laps 3 --split-method start --output outputs\current_heatmap.png
+python gps_current_heatmap.py data\runs\morning-run\Utsm.gpx data\runs\morning-run\telemetry_20260411_112302.csv --laps 3 --split-method start --output outputs\current_heatmap.png
 ```
 
 Run smoke tests and regenerate the multi-run dashboard:
@@ -177,8 +190,8 @@ Run smoke tests and regenerate the multi-run dashboard:
 ```powershell
 python tests\test_smoke.py
 python build_interactive_dashboard.py --laps 3 --strategy-step-m 50 --output outputs\telemetry_strategy_dashboard.html
-python analyze_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --output-prefix outputs\afternoon_clean_demo
-python simulate_speed_strategy.py Utsm-2.gpx telemetry_dumps\telemetry_20260411_122713.csv --laps 3 --split-method start --strategy-step-m 50 --time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
+python analyze_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\afternoon-run\telemetry_20260411_122713.csv --laps 3 --split-method start --output-prefix outputs\afternoon_clean_demo
+python simulate_speed_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\afternoon-run\telemetry_20260411_122713.csv --laps 3 --split-method start --strategy-step-m 50 --time-tolerance-pct 3 --fuse-current-ma 20000 --fuse-max-duration-sec 1.0 --output-prefix outputs\speed_strategy
 ```
 
 ## Notes And Limits
