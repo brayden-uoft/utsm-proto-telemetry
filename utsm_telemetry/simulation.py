@@ -16,11 +16,14 @@ DEFAULT_MOTOR_PROFILE = {
     "nominal_speed_rpm": 7560.0,
     "top_speed_kph": 39.0,
     "wheel_diameter_m": 0.50,
-    "vehicle_mass_kg": 100.0,
+    "vehicle_mass_kg": 50.0,
+    "driver_mass_kg": 50.0,
     "rolling_resistance_coeff": 0.008,
     "drivetrain_efficiency": 0.82,
+    "corner_drag_factor": 0.1,
+    "cd_area_m2": 0.07235,  # Drag coefficient × frontal area (CdA)
+    "air_density_kg_m3": 1.225,  
 }
-
 
 def build_full_run_distance(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().sort_values("time").reset_index(drop=True)
@@ -41,17 +44,47 @@ def classify_strategy_action(delta_kph: float, hold_delta_kph: float = 1.0) -> s
 
 def build_motor_config(
     wheel_diameter_m: float = 0.50,
-    vehicle_mass_kg: float = 100.0,
+    vehicle_mass_kg: float = 50.0,
+    driver_mass_kg: float = 50.0,
     rolling_resistance_coeff: float = 0.008,
     drivetrain_efficiency: float = 0.82,
+    corner_drag_factor: float = 0.1,
+    cd_area_m2: float = 0.07235,
+    air_density_kg_m3: float = 1.225,
 ) -> dict[str, float | str]:
+    """Build motor configuration with optional aerodynamic drag parameters.
+    
+    Parameters
+    ----------
+    wheel_diameter_m:
+        Wheel diameter in meters.
+    vehicle_mass_kg:
+        Vehicle structure mass (chassis, motor, electronics) in kg.
+    driver_mass_kg:
+        Driver mass in kg. Adds to total vehicle mass for resistance calculations.
+    rolling_resistance_coeff:
+        Rolling resistance coefficient (typically 0.005–0.010 for small vehicles).
+    drivetrain_efficiency:
+        Motor-to-wheel efficiency (motor electrical to mechanical at output).
+    corner_drag_factor:
+        Fraction of centripetal force treated as extra rolling resistance in turns.
+    cd_area_m2:
+        Aerodynamic drag parameter (CdA): Cd × frontal area in m².
+        Set to 0 to disable aerodynamic drag calculations.
+    air_density_kg_m3:
+        Air density (default 1.225 kg/m³ at sea level, ~1.184 at 500 m elevation).
+    """
     if wheel_diameter_m <= 0:
         raise ValueError("wheel_diameter_m must be positive.")
     if vehicle_mass_kg <= 0:
         raise ValueError("vehicle_mass_kg must be positive.")
+    if driver_mass_kg < 0:
+        raise ValueError("driver_mass_kg must be non-negative.")
+    
     config = dict(DEFAULT_MOTOR_PROFILE)
     config["wheel_diameter_m"] = float(wheel_diameter_m)
     config["vehicle_mass_kg"] = float(vehicle_mass_kg)
+    config["driver_mass_kg"] = float(driver_mass_kg)
     config["rolling_resistance_coeff"] = float(rolling_resistance_coeff)
     config["drivetrain_efficiency"] = float(drivetrain_efficiency)
     config["inferred_gear_ratio"] = infer_gear_ratio(
@@ -59,6 +92,9 @@ def build_motor_config(
         motor_top_rpm=float(config["nominal_speed_rpm"]),
         wheel_diameter_m=wheel_diameter_m,
     )
+    config["corner_drag_factor"] = float(corner_drag_factor)
+    config["cd_area_m2"] = float(cd_area_m2)
+    config["air_density_kg_m3"] = float(air_density_kg_m3)
     return config
 
 
@@ -104,6 +140,11 @@ def build_strategy_segments(df: pd.DataFrame, segments: int) -> pd.DataFrame:
             "center_frac": ((lo + hi) * 0.5) / total_dist,
             "baseline_speed_kph": float(speed.median()) if not speed.empty else 0.0,
             "baseline_grade_pct": float(grade.mean()) if not grade.empty else 0.0,
+            "baseline_curvature_1_m": float(
+                pd.to_numeric(seg.get("curvature_1_m"), errors="coerce")
+                .dropna()
+                .median()
+            ) if "curvature_1_m" in seg.columns else 0.0,
             "baseline_current_mA": float(current.mean()) if not current.empty else 0.0,
             "baseline_power_w": float(power.mean()) if not power.empty else 0.0,
             "baseline_energy_j": float(energy_j),
@@ -116,17 +157,6 @@ def build_strategy_segments(df: pd.DataFrame, segments: int) -> pd.DataFrame:
     if out.empty:
         raise ValueError("No strategy segments could be built.")
     return out
-
-
-def build_strategy_segments_by_distance(df: pd.DataFrame, strategy_step_m: float = 50.0) -> pd.DataFrame:
-    if strategy_step_m <= 0:
-        raise ValueError("strategy_step_m must be positive.")
-    df = build_full_run_distance(df)
-    total_dist = float(df["run_cumdist_m"].iloc[-1])
-    if total_dist <= 0:
-        raise ValueError("run_cumdist_m must be positive.")
-    segments = max(int(math.ceil(total_dist / strategy_step_m)), 2)
-    return build_strategy_segments(df, segments=segments)
 
 
 def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[str, object]:
@@ -170,29 +200,13 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
     ) if "voltage_mV" in df.columns else 24.0
     if not math.isfinite(median_voltage_v) or median_voltage_v <= 0:
         median_voltage_v = 24.0
-    coast_current_threshold_mA = max(500.0, float(fit["current_mA"].quantile(0.20)))
-    coast_fit = fit[
-        (fit["current_mA"] <= coast_current_threshold_mA)
-        & (fit["speed_kph"] >= 2.0)
-        & (fit["gps_accel_m_s2"] < -0.03)
-    ].copy()
-    if len(coast_fit) < 8:
-        coast_fit = fit[(fit["gps_accel_m_s2"] < -0.03) & (fit["speed_kph"] >= 2.0)].copy()
-    if len(coast_fit) >= 4:
-        coast_design = _coast_design_matrix(coast_fit)
-        coast_coeffs = _solve_ridge(coast_design, coast_fit["gps_accel_m_s2"].to_numpy(dtype=float), ridge)
-    else:
-        coast_coeffs = np.array([-0.25, 0.0, 0.0, -0.098])
     return {
         "current_coeffs": current_coeffs,
         "power_coeffs": power_coeffs,
-        "coast_coeffs": coast_coeffs,
         "ridge": float(ridge),
         "on_current_mA": max(on_current_mA, cruise_current_mA, 1000.0),
         "cruise_current_mA": max(cruise_current_mA, 0.0),
         "median_voltage_v": median_voltage_v,
-        "coast_current_threshold_mA": coast_current_threshold_mA,
-        "coast_sample_count": int(len(coast_fit)),
     }
 
 
@@ -240,6 +254,7 @@ def predict_strategy_electrical(
     position_frac: float,
     action: str,
     motor_config: dict[str, float | str] | None = None,
+    curvature_1_m: float = 0.0,
 ) -> dict[str, float]:
     if action == ACTION_COAST:
         return {
@@ -248,7 +263,6 @@ def predict_strategy_electrical(
             "peak_current_mA": 0.0,
             "on_current_mA": 0.0,
             "throttle_duty": 0.0,
-            "throttle_level": 0.0,
             "fuse_risk_duration_s": 0.0,
         }
 
@@ -277,31 +291,27 @@ def predict_strategy_electrical(
     on_current = float(model.get("on_current_mA", max(raw_current, 1000.0)))
     cruise_current = float(model.get("cruise_current_mA", raw_current))
     voltage_v = float(model.get("median_voltage_v", 24.0))
-    physics_power_w = _physics_propulsion_power_w(speed_kph, accel_m_s2, grade_pct, motor_config)
+    physics_power_w = _physics_propulsion_power_w(
+        speed_kph, accel_m_s2, grade_pct, motor_config, curvature_1_m=curvature_1_m,
+    )
     physics_current_mA = physics_power_w / max(voltage_v, 1.0) * 1000.0
     if action == ACTION_ACCELERATE:
         duty = _clamp(0.22 + max(accel_m_s2, 0.0) * 1.8, 0.18, 1.0)
         on_current = max(on_current, raw_current / max(duty, 0.05))
         avg_current = max(raw_current, on_current * duty)
-        throttle_level = duty
-        spike_multiplier = 1.0 + _clamp(max(accel_m_s2, 0.0) * 1.2, 0.0, 1.25)
     else:
         avg_current = max(raw_current, cruise_current)
         on_current = max(on_current, avg_current * 1.35)
         duty = _clamp(avg_current / max(on_current, 1.0), 0.04, 0.85)
         avg_current = on_current * duty
-        throttle_level = duty
-        spike_multiplier = 1.08
     avg_current = max(avg_current, physics_current_mA)
     avg_power = max(raw_power, avg_current / 1000.0 * voltage_v, physics_power_w)
-    peak_current = max(on_current * spike_multiplier, avg_current)
     return {
         "avg_current_mA": float(avg_current),
         "avg_power_w": float(avg_power),
-        "peak_current_mA": float(peak_current),
+        "peak_current_mA": float(on_current),
         "on_current_mA": float(on_current),
         "throttle_duty": float(duty),
-        "throttle_level": float(throttle_level),
         "fuse_risk_duration_s": 0.0,
     }
 
@@ -320,7 +330,6 @@ def optimize_speed_profile(
     current_penalty_weight: float = 5.0,
     motor_config: dict[str, float | str] | None = None,
     start_speed_kph: float = 0.0,
-    min_time_sec: float | None = None,
 ) -> pd.DataFrame:
     if time_budget_sec <= 0:
         raise ValueError("time_budget_sec must be positive.")
@@ -357,14 +366,9 @@ def optimize_speed_profile(
                     if abs(delta_kph) > max_delta_kph_per_segment and not launch_from_stop:
                         continue
                     action = classify_strategy_action(delta_kph, hold_delta_kph=hold_delta_kph)
-                    if action == ACTION_COAST:
-                        coast_exit = _coast_exit_speed_kph(float(prev_speed), length_m, grade_pct, model)
-                        coast_exit = max(coast_exit, speed_min_kph)
-                        coast_tolerance = max(speed_step_kph * 1.5, 1.0)
-                        if abs(speed - coast_exit) > coast_tolerance:
-                            continue
                     accel_m_s2 = _signed_accel_from_speed_change(float(prev_speed), speed, length_m)
                     time_s = _segment_transition_time_s(length_m, float(prev_speed), speed)
+                    curvature_1_m = float(row.get("baseline_curvature_1_m", 0.0))
                     electrical = predict_strategy_electrical(
                         model,
                         speed_kph=speed,
@@ -373,6 +377,7 @@ def optimize_speed_profile(
                         position_frac=position_frac,
                         action=action,
                         motor_config=motor_config,
+                        curvature_1_m=curvature_1_m,
                     )
                     pred_current_mA = electrical["avg_current_mA"]
                     pred_power_w = electrical["avg_power_w"]
@@ -469,23 +474,6 @@ def optimize_speed_profile(
         out["pred_peak_current_mA"] = [row["peak_current_mA"] for row in electrical_rows]
         out["pred_on_current_mA"] = [row["on_current_mA"] for row in electrical_rows]
         out["throttle_duty"] = [row["throttle_duty"] for row in electrical_rows]
-        out["throttle_level"] = [row["throttle_level"] for row in electrical_rows]
-        out["pulse_duration_s"] = [
-            0.0 if action == ACTION_COAST else time_s * duty
-            for action, time_s, duty in zip(out["action"], out["segment_time_s"], out["throttle_duty"])
-        ]
-        out["coast_duration_s"] = [
-            time_s if action == ACTION_COAST else (time_s - pulse_s if action == ACTION_HOLD else 0.0)
-            for action, time_s, pulse_s in zip(out["action"], out["segment_time_s"], out["pulse_duration_s"])
-        ]
-        out["coast_speed_drop_kph"] = [
-            max(entry - target, 0.0) if coast_s > 0 else 0.0
-            for entry, target, coast_s in zip(
-                out["entry_speed_kph"],
-                out["target_speed_kph"],
-                out["coast_duration_s"],
-            )
-        ]
         out["pred_energy_j"] = out["pred_power_w"] * out["segment_time_s"]
         out["cum_pred_energy_j"] = out["pred_energy_j"].cumsum()
         out["cum_pred_time_s"] = out["segment_time_s"].cumsum()
@@ -509,48 +497,12 @@ def optimize_speed_profile(
         out.attrs["lambda_time"] = float(lambda_time)
         out.attrs["fuse_current_ma"] = float(fuse_current_ma)
         out.attrs["fuse_max_duration_sec"] = float(fuse_max_duration_sec)
-        out.attrs["time_budget_sec"] = float(time_budget_sec)
-        out.attrs["min_time_sec"] = float(target_min_time) if target_min_time is not None else None
         out.attrs["motor_config"] = motor_config or {}
         out.attrs["start_speed_kph"] = float(start_speed_kph)
-        out.attrs["coast_sample_count"] = int(model.get("coast_sample_count", 0))
         return out
 
-    target_min_time = float(min_time_sec) if min_time_sec is not None else None
-    if target_min_time is not None and target_min_time <= 0:
-        target_min_time = None
-
-    lambda_grid = [
-        -2000.0,
-        -1000.0,
-        -500.0,
-        -250.0,
-        -100.0,
-        -50.0,
-        -20.0,
-        -10.0,
-        -5.0,
-        -2.0,
-        -1.0,
-        0.0,
-    ]
-    candidates = []
-    for lambda_time in lambda_grid:
-        try:
-            candidates.append(solve_for_lambda(lambda_time))
-        except ValueError:
-            continue
-    feasible = [
-        candidate
-        for candidate in candidates
-        if candidate.attrs["total_time_s"] <= time_budget_sec
-        and (target_min_time is None or candidate.attrs["total_time_s"] >= target_min_time)
-    ]
-    if feasible:
-        return min(feasible, key=lambda item: float(item["pred_energy_j"].sum()))
-
     low = solve_for_lambda(0.0)
-    if low.attrs["total_time_s"] <= time_budget_sec and target_min_time is None:
+    if low.attrs["total_time_s"] <= time_budget_sec:
         return low
 
     hi_lambda = 1.0
@@ -569,13 +521,6 @@ def optimize_speed_profile(
         else:
             hi_lambda = mid_lambda
             best = mid
-    if target_min_time is not None and best.attrs["total_time_s"] < target_min_time:
-        under_budget = [candidate for candidate in candidates if candidate.attrs["total_time_s"] <= time_budget_sec]
-        if under_budget:
-            return min(
-                under_budget,
-                key=lambda item: abs(item.attrs["total_time_s"] - target_min_time),
-            )
     return best
 
 
@@ -598,11 +543,7 @@ def build_strategy_samples(df: pd.DataFrame, profile_df: pd.DataFrame) -> pd.Dat
     samples["pred_peak_current_mA"] = mapped.get("pred_peak_current_mA", mapped["pred_current_mA"])
     samples["pred_on_current_mA"] = mapped.get("pred_on_current_mA", mapped["pred_current_mA"])
     samples["throttle_duty"] = mapped.get("throttle_duty", 0.0)
-    samples["throttle_level"] = mapped.get("throttle_level", samples["throttle_duty"])
     samples["pred_power_w"] = mapped["pred_power_w"]
-    samples["pulse_duration_s"] = mapped.get("pulse_duration_s", 0.0)
-    samples["coast_duration_s"] = mapped.get("coast_duration_s", 0.0)
-    samples["coast_speed_drop_kph"] = mapped.get("coast_speed_drop_kph", 0.0)
     samples["pred_energy_j"] = pd.to_numeric(samples["dt_s"], errors="coerce").fillna(0.0) * mapped["pred_power_w"]
     samples["pred_cum_energy_j"] = samples["pred_energy_j"].cumsum()
     samples["pred_over_fuse_limit"] = mapped["over_fuse_limit"]
@@ -666,12 +607,6 @@ def build_strategy_report(
         profile_df["pred_peak_current_mA"] = profile_df["pred_current_mA"]
     if "throttle_duty" not in profile_df.columns:
         profile_df["throttle_duty"] = 0.0
-    if "throttle_level" not in profile_df.columns:
-        profile_df["throttle_level"] = profile_df["throttle_duty"]
-    if "pulse_duration_s" not in profile_df.columns:
-        profile_df["pulse_duration_s"] = 0.0
-    if "coast_duration_s" not in profile_df.columns:
-        profile_df["coast_duration_s"] = 0.0
     baseline_energy_j = float(pd.to_numeric(baseline_df["energy_j"], errors="coerce").fillna(0.0).sum())
     baseline_time_s = float(pd.to_numeric(baseline_df["dt_s"], errors="coerce").fillna(0.0).sum())
     pred_energy_j = float(profile_df["pred_energy_j"].sum())
@@ -688,18 +623,6 @@ def build_strategy_report(
         profile_df["segment_time_s"].tolist(),
     )
     near_fuse = profile_df[profile_df["pred_peak_current_mA"] >= 0.9 * fuse_current_ma]
-    total_coast_time = float(pd.to_numeric(profile_df["coast_duration_s"], errors="coerce").fillna(0.0).sum())
-    total_coast_dist = float(
-        profile_df.loc[profile_df["coast_duration_s"] > 0, "length_m"].sum()
-    )
-    pulse_count = int((pd.to_numeric(profile_df["pulse_duration_s"], errors="coerce").fillna(0.0) > 0).sum())
-    avg_pulse_duration = float(
-        pd.to_numeric(profile_df.loc[profile_df["pulse_duration_s"] > 0, "pulse_duration_s"], errors="coerce")
-        .dropna()
-        .mean()
-    )
-    if not math.isfinite(avg_pulse_duration):
-        avg_pulse_duration = 0.0
 
     lines = [
         "=== Speed Strategy Report ===",
@@ -716,10 +639,13 @@ def build_strategy_report(
         f"Top speed cap: {float(motor_config.get('top_speed_kph', 0.0)):.1f} km/h",
         f"Assumed wheel diameter: {float(motor_config.get('wheel_diameter_m', 0.0)):.2f} m",
         f"Inferred gear ratio: {float(motor_config.get('inferred_gear_ratio', 0.0)):.2f}:1",
+        f"Vehicle mass: {float(motor_config.get('vehicle_mass_kg', 0.0)):.1f} kg",
+        f"Driver mass: {float(motor_config.get('driver_mass_kg', 0.0)):.1f} kg",
+        f"Total mass: {float(motor_config.get('vehicle_mass_kg', 0.0)) + float(motor_config.get('driver_mass_kg', 0.0)):.1f} kg",
+        f"Aerodynamic drag (CdA): {float(motor_config.get('cd_area_m2', 0.0)):.4f} m²",
+        f"Rolling resistance coefficient: {float(motor_config.get('rolling_resistance_coeff', 0.008)):.6f}",
+        f"Air density: {float(motor_config.get('air_density_kg_m3', 1.225)):.3f} kg/m³",
         f"Coast policy: 0 mA propulsion current",
-        f"Coast model samples: {int(profile_df.attrs.get('coast_sample_count', 0))}",
-        f"Pulse/coast summary: {pulse_count} pulse segment(s), {avg_pulse_duration:.2f}s average pulse",
-        f"Predicted no-throttle coast: {total_coast_time:.1f}s over {total_coast_dist:.1f} m",
     ]
     if calibration:
         lines.extend([
@@ -758,7 +684,7 @@ def build_strategy_report(
                 lines.append(
                     f"Segment {int(row.segment)} -> {row.action} at {row.target_speed_kph:.1f} km/h, "
                     f"avg current {row.pred_current_mA:.0f} mA, peak current {row.pred_peak_current_mA:.0f} mA, "
-                    f"throttle {row.throttle_level:.2f}, pred energy {row.pred_energy_j:.1f} J"
+                    f"duty {row.throttle_duty:.2f}, pred energy {row.pred_energy_j:.1f} J"
                 )
         lines.append("")
     return "\n".join(lines).strip()
@@ -788,17 +714,6 @@ def _design_matrix(df: pd.DataFrame) -> np.ndarray:
         is_coast,
         pos_accel * speed,
         neg_accel * speed,
-    ])
-
-
-def _coast_design_matrix(df: pd.DataFrame) -> np.ndarray:
-    speed = df["speed_kph"].to_numpy(dtype=float)
-    grade = df["grade_pct"].to_numpy(dtype=float)
-    return np.column_stack([
-        np.ones(len(df)),
-        speed,
-        speed ** 2,
-        grade,
     ])
 
 
@@ -854,27 +769,6 @@ def _segment_transition_time_s(length_m: float, prev_speed_kph: float, speed_kph
     return float(length_m / avg_speed_m_s)
 
 
-def _predict_coast_accel_m_s2(model: dict[str, object], speed_kph: float, grade_pct: float) -> float:
-    coeffs = np.asarray(model.get("coast_coeffs", np.array([-0.25, 0.0, 0.0, -0.098])), dtype=float)
-    features = np.array([1.0, speed_kph, speed_kph ** 2, grade_pct])
-    accel = min(float(features @ coeffs), -0.06)
-    return float(np.clip(accel, -4.0, -0.06))
-
-
-def _coast_exit_speed_kph(
-    prev_speed_kph: float,
-    length_m: float,
-    grade_pct: float,
-    model: dict[str, object],
-) -> float:
-    v0 = max(prev_speed_kph / 3.6, 0.0)
-    if length_m <= 0 or v0 <= 0:
-        return 0.0
-    accel = _predict_coast_accel_m_s2(model, prev_speed_kph, grade_pct)
-    v1_sq = max(v0 * v0 + 2.0 * accel * length_m, 0.0)
-    return float(math.sqrt(v1_sq) * 3.6)
-
-
 def _signed_accel_from_speed_change(prev_speed_kph: float, speed_kph: float, length_m: float) -> float:
     if length_m <= 0:
         return 0.0
@@ -902,17 +796,69 @@ def _physics_propulsion_power_w(
     accel_m_s2: float,
     grade_pct: float,
     motor_config: dict[str, float | str] | None,
+    curvature_1_m: float = 0.0,
 ) -> float:
+    """Estimate mechanical propulsive power in watts.
+    
+    Force components (all in Newtons):
+      F_roll  = (m_vehicle + m_driver) * g * Crr   (rolling resistance)
+      F_slope = (m_vehicle + m_driver) * g * sin(θ) ≈ (m_vehicle + m_driver) * g * (grade_pct / 100)
+                                                     (hill climb / descent)
+      F_accel = (m_vehicle + m_driver) * a         (Newton's 2nd law)
+      F_drag  = 0.5 * ρ * CdA * v²                  (aerodynamic drag)
+      F_corner = corner_drag_factor * (m_vehicle + m_driver) * v² * κ
+                                                     (corner resistance via tire scrub)
+    
+    Power = F_total * v / η  (η = drivetrain efficiency)
+    
+    Notes
+    -----
+    - Driver mass is included in total mass for resistance calculations.
+    - Aerodynamic drag is enabled if cd_area_m2 > 0; otherwise it is disabled.
+    - The drag force is velocity-squared, making it significant at higher speeds.
+    - Corner drag uses a dimensionless factor (default 0.1) that approximates
+      effective rolling resistance from tire scrub during cornering.
+    - Air density defaults to sea level (1.225 kg/m³) but can be adjusted for
+      altitude or weather variations.
+    """
     if motor_config is None:
         return 0.0
+    
     speed_m_s = max(speed_kph / 3.6, 0.0)
-    mass_kg = float(motor_config.get("vehicle_mass_kg", 100.0))
+    vehicle_mass_kg = float(motor_config.get("vehicle_mass_kg", 100.0))
+    driver_mass_kg = float(motor_config.get("driver_mass_kg", 0.0))
+    total_mass_kg = vehicle_mass_kg + driver_mass_kg
+    
     crr = float(motor_config.get("rolling_resistance_coeff", 0.008))
     efficiency = max(float(motor_config.get("drivetrain_efficiency", 0.82)), 0.05)
-    grade_force = mass_kg * 9.80665 * (grade_pct / 100.0)
-    accel_force = mass_kg * max(accel_m_s2, 0.0)
-    rolling_force = mass_kg * 9.80665 * crr
-    propulsive_force = max(accel_force + grade_force + rolling_force, 0.0)
+    corner_drag_factor = float(motor_config.get("corner_drag_factor", 0.1))
+    cd_area_m2 = float(motor_config.get("cd_area_m2", 0.0))
+    air_density_kg_m3 = float(motor_config.get("air_density_kg_m3", 1.225))
+    
+    # Rolling resistance: proportional to normal force (weight)
+    rolling_force = total_mass_kg * 9.80665 * crr
+    
+    # Grade resistance: component of weight along slope
+    grade_force = total_mass_kg * 9.80665 * (grade_pct / 100.0)
+    
+    # Acceleration force: F = m * a (only positive acceleration counts)
+    accel_force = total_mass_kg * max(accel_m_s2, 0.0)
+    
+    # Aerodynamic drag: F_drag = 0.5 * ρ * CdA * v²
+    # Only included if cd_area_m2 > 0 (allows disabling for calibration/testing)
+    if cd_area_m2 > 0:
+        aero_drag_force = 0.5 * air_density_kg_m3 * cd_area_m2 * (speed_m_s ** 2)
+    else:
+        aero_drag_force = 0.0
+    
+    # Corner drag: effective resistance from tire scrub in turns
+    # F_corner = corner_drag_factor * m * v² * κ
+    corner_force = corner_drag_factor * total_mass_kg * (speed_m_s ** 2) * max(curvature_1_m, 0.0)
+    
+    # Total propulsive force (only positive, so we overcome all resistances)
+    propulsive_force = max(rolling_force + grade_force + accel_force + aero_drag_force + corner_force, 0.0)
+    
+    # Power = Force × Velocity / Efficiency
     return float(propulsive_force * speed_m_s / efficiency)
 
 
