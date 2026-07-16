@@ -41,20 +41,7 @@ from utsm_telemetry import (
     read_telemetry,
 )
 
-DEFAULT_RUNS = [
-    {
-        "id": "morning",
-        "label": "Morning run",
-        "gps": "Utsm.gpx",
-        "telemetry": os.path.join("telemetry_dumps", "telemetry_20260411_112302.csv"),
-    },
-    {
-        "id": "afternoon",
-        "label": "Afternoon run",
-        "gps": "Utsm-2.gpx",
-        "telemetry": os.path.join("telemetry_dumps", "telemetry_20260411_122713.csv"),
-    },
-]
+DEFAULT_RUNS_DIR = os.path.join("data", "runs")
 DEFAULT_OUTPUT = os.path.join("outputs", "telemetry_strategy_dashboard.html")
 
 METRICS = {
@@ -101,6 +88,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--gps")
     parser.add_argument("--telemetry")
+    parser.add_argument(
+        "--runs-dir",
+        default=DEFAULT_RUNS_DIR,
+        help=(
+            "Directory containing one subfolder per run, each with exactly one "
+            ".gpx file and one telemetry .csv file. New runs are picked up "
+            "automatically just by adding a folder here (default: data/runs)."
+        ),
+    )
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT)
     parser.add_argument("--laps", type=int, default=3)
     parser.add_argument(
@@ -140,6 +136,66 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _slugify(name: str) -> str:
+    slug = "".join(ch if ch.isalnum() else "-" for ch in name.strip().lower())
+    slug = "-".join(part for part in slug.split("-") if part)
+    return slug or "run"
+
+
+def _prettify(name: str) -> str:
+    words = [w for w in name.replace("_", " ").replace("-", " ").split() if w]
+    return " ".join(w.capitalize() for w in words) if words else name
+
+
+def discover_runs(runs_dir: str) -> list[dict[str, str]]:
+    """Auto-discover runs from a folder of subfolders.
+
+    Each subfolder of `runs_dir` is treated as one run and must contain
+    exactly one `.gpx` file and one telemetry `.csv` file. Folder and file
+    names are completely free-form (e.g. `data/runs/june-20-test/` holding
+    `june-20-2026.gpx` and `Telemetry_001.csv`) - nothing needs to match a
+    naming convention, and no code changes are needed to pick up new runs.
+    """
+    if not os.path.isdir(runs_dir):
+        return []
+
+    runs: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for entry in sorted(os.listdir(runs_dir)):
+        run_path = os.path.join(runs_dir, entry)
+        if not os.path.isdir(run_path) or entry.startswith("."):
+            continue
+
+        gpx_files = sorted(f for f in os.listdir(run_path) if f.lower().endswith(".gpx"))
+        csv_files = sorted(f for f in os.listdir(run_path) if f.lower().endswith(".csv"))
+
+        if len(gpx_files) != 1 or len(csv_files) != 1:
+            print(
+                f"WARNING: skipping run folder '{entry}' - expected exactly one "
+                f".gpx and one .csv file, found {len(gpx_files)} gpx and "
+                f"{len(csv_files)} csv. Skipping.",
+                file=sys.stderr,
+            )
+            continue
+
+        run_id = _slugify(entry)
+        unique_id = run_id
+        suffix = 2
+        while unique_id in seen_ids:
+            unique_id = f"{run_id}-{suffix}"
+            suffix += 1
+        seen_ids.add(unique_id)
+
+        runs.append({
+            "id": unique_id,
+            "label": _prettify(entry),
+            "gps": os.path.join(run_path, gpx_files[0]),
+            "telemetry": os.path.join(run_path, csv_files[0]),
+        })
+
+    return runs
+
+
 def resolve_run_specs(args: argparse.Namespace) -> list[dict[str, str]]:
     if args.gps and args.telemetry:
         return [{
@@ -150,7 +206,16 @@ def resolve_run_specs(args: argparse.Namespace) -> list[dict[str, str]]:
         }]
     if args.gps or args.telemetry:
         raise ValueError("--gps and --telemetry must be provided together.")
-    return list(DEFAULT_RUNS)
+
+    runs = discover_runs(args.runs_dir)
+    if not runs:
+        raise SystemExit(
+            f"No runs found in '{args.runs_dir}'. Add a subfolder per run, each "
+            "containing exactly one .gpx file and one telemetry .csv file "
+            "(e.g. data/runs/june-20-test/june-20-2026.gpx + Telemetry_001.csv), "
+            "or pass --gps/--telemetry for a single one-off run."
+        )
+    return runs
 
 
 def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, str]:

@@ -1,4 +1,4 @@
-# Acceleration, Throttle Proxy, and Strategy Simulation Plan
+.venv\Scripts\Activate.ps1# Acceleration, Throttle Proxy, and Strategy Simulation Plan
 
 ## Slack Context
 
