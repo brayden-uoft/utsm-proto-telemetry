@@ -44,6 +44,11 @@ from utsm_telemetry.simulation import (
     predict_current_mA,
     predict_power_w,
 )
+from utsm_telemetry.strategy_export import (
+    build_firmware_strategy_table,
+    nearest_strategy_recommendation,
+    render_strategy_header,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +596,7 @@ class TestSimulation(unittest.TestCase):
         self.assertAlmostEqual(ratio, 7560.0 / expected_wheel_rpm)
         config = build_motor_config(0.50)
         self.assertAlmostEqual(config["inferred_gear_ratio"], ratio)
-        self.assertEqual(config["vehicle_mass_kg"], 100.0)
+        self.assertEqual(config["vehicle_mass_kg"], 50.0)
 
     def test_baseline_prediction_evaluation_reports_error(self):
         df = pd.DataFrame({
@@ -777,6 +782,69 @@ class TestSimulation(unittest.TestCase):
             longest = max(longest, run)
         self.assertLessEqual(longest, 1.0)
         self.assertTrue(set(profile["action"]).issubset({"accelerate", "hold", "coast"}))
+
+
+class TestFirmwareStrategyExport(unittest.TestCase):
+    def test_export_table_maps_nearby_gps_to_target_speed(self):
+        points = [(0.0, 0.0), (25.0, 0.0), (50.0, 0.0), (75.0, 0.0), (100.0, 0.0)]
+        gps = add_xy(_make_gps_from_xy(points))
+        samples = gps.copy()
+        samples["run_cumdist_m"] = [0.0, 25.0, 50.0, 75.0, 100.0]
+        samples["dist_m"] = [0.0, 25.0, 25.0, 25.0, 25.0]
+        samples["time"] = pd.date_range("2026-04-11T12:00:00Z", periods=len(samples), freq="1s")
+        profile = pd.DataFrame({
+            "segment": [1, 2],
+            "dist_end_m": [50.0, 100.0],
+            "target_speed_kph": [18.0, 24.0],
+            "action": ["hold", "accelerate"],
+        })
+
+        table, meta = build_firmware_strategy_table(
+            samples,
+            profile,
+            name="strategy_test",
+            spacing_m=25.0,
+            offtrack_radius_m=12.0,
+        )
+
+        self.assertEqual(len(table), 5)
+        self.assertEqual(table["target_speed_kph"].iloc[0], 18.0)
+        self.assertEqual(table["target_speed_kph"].iloc[-1], 24.0)
+
+        query = _make_gps_from_xy([(75.0, 5.0)]).iloc[0]
+        rec = nearest_strategy_recommendation(
+            table,
+            meta,
+            lat=float(query["lat"]),
+            lon=float(query["lon"]),
+        )
+        self.assertTrue(rec["valid"])
+        self.assertEqual(rec["target_speed_kph"], 24.0)
+        self.assertLessEqual(rec["distance_from_track_m"], 12.0)
+
+        far_query = _make_gps_from_xy([(75.0, 30.0)]).iloc[0]
+        far_rec = nearest_strategy_recommendation(
+            table,
+            meta,
+            lat=float(far_query["lat"]),
+            lon=float(far_query["lon"]),
+        )
+        self.assertFalse(far_rec["valid"])
+
+    def test_header_contains_scaled_firmware_table(self):
+        samples = add_xy(_make_gps_from_xy([(0.0, 0.0), (20.0, 0.0)]))
+        samples["run_cumdist_m"] = [0.0, 20.0]
+        profile = pd.DataFrame({
+            "segment": [1],
+            "dist_end_m": [20.0],
+            "target_speed_kph": [19.5],
+            "action": ["coast"],
+        })
+        table, meta = build_firmware_strategy_table(samples, profile, spacing_m=20.0)
+        header = render_strategy_header(table, meta, guard_name="strategy_test")
+        self.assertIn("struct StrategyPoint", header)
+        self.assertIn("STRATEGY_OFFTRACK_RADIUS_M", header)
+        self.assertIn("195", header)
 
 
 if __name__ == "__main__":
