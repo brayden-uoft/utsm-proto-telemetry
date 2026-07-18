@@ -202,3 +202,80 @@ python simulate_speed_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\a
 - GPS acceleration is low bandwidth because it comes from GPX speed changes.
 - MPU dynamic acceleration is useful for diagnostics, but sensor orientation and gravity compensation are still imperfect without gyro fusion or a known mounting calibration.
 - Generated outputs, caches, and local scratch artifacts should stay out of Git.
+
+## Live LTE Dashboard
+
+The live page is separate from the generated historical replay dashboard. It
+runs a small FastAPI server that accepts one telemetry record at a time, keeps
+the most recent records in memory, and sends them to connected browsers over a
+WebSocket.
+
+Start it in PowerShell:
+
+```powershell
+$env:UTSM_TELEMETRY_API_KEY = "replace-this-for-real-tests"
+python -m uvicorn live_dashboard.app:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://127.0.0.1:8000/live`. Test the complete page without hardware in a
+second PowerShell window:
+
+```powershell
+python send_live_test.py --api-key "replace-this-for-real-tests" --gps
+```
+
+The page includes:
+
+- current, voltage, power, and acceleration gauges
+- four rolling live charts
+- a table preserving the current telemetry CSV column names
+- an optional live map and trail when latitude/longitude arrive
+- a stale-data indicator when the car has not reported for five seconds
+
+The API endpoint is `POST /api/live/telemetry` and requires the
+`X-Telemetry-Key` header. Records retain the existing seven CSV fields and add
+packet identity plus optional `latitude` and `longitude` fields.
+
+### Reaching the local server from LTE
+
+`localhost` and private Wi-Fi addresses are not reachable from a cellular
+modem. For a development test, expose port 8000 with a temporary HTTPS tunnel.
+For example, after installing `cloudflared`:
+
+```powershell
+cloudflared tunnel --url http://localhost:8000
+```
+
+Copy the generated `https://...trycloudflare.com` hostname into the relay's
+`TELEMETRY_ENDPOINT`, followed by `/api/live/telemetry`. Use the same API key in
+the relay configuration and the `UTSM_TELEMETRY_API_KEY` environment variable.
+Quick tunnel hostnames change when the tunnel restarts and are intended only
+for development.
+
+### Verified ESP-NOW to LTE demo
+
+The live page was verified end to end with an ESP32-C3 SuperMini sending dummy
+telemetry over ESP-NOW channel 1 to a LILYGO T-A7670G R2. The A7670G relayed
+the packets over a Public Mobile LTE connection through a Cloudflare quick
+tunnel. Packet sequence, current, voltage, acceleration, and fake GPS values
+arrived intact at the dashboard.
+
+Use the matching firmware sketches from
+[`UTSM-proto/utsm-telem-firmware`](https://github.com/UTSM-proto/utsm-telem-firmware):
+
+- `lte_relay/lte_relay.ino` on the A7670G, with `LTE_DUMMY_TEST_MODE = false`
+- `telem-v1/espnow_dummy_sender/espnow_dummy_sender.ino` on the C3 for the
+  full-path dummy test
+- `telem-v1/telemetry_gpio1_led_sd_per_session.ino` on the C3 to return to
+  real sensor and SD-backed telemetry
+
+The successful full-path serial indicators are:
+
+```text
+C3: C3 ESP-NOW queued seq=N
+Relay: Dashboard POST status=202
+Relay: LIVE seq=N delivered
+```
+
+The relay and server must use the same API key. The relay endpoint must contain
+the complete quick-tunnel URL ending in `/api/live/telemetry`.

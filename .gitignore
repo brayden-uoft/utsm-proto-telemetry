@@ -10,3 +10,6 @@ outputs/*
 # Local captures and temporary inspection files.
 *.bin
 tmp_*.py
+
+# Live dashboard secrets.
+.env
