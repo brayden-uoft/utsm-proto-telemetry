@@ -251,3 +251,31 @@ Copy the generated `https://...trycloudflare.com` hostname into the relay's
 the relay configuration and the `UTSM_TELEMETRY_API_KEY` environment variable.
 Quick tunnel hostnames change when the tunnel restarts and are intended only
 for development.
+
+### Verified ESP-NOW to LTE demo
+
+The live page was verified end to end with an ESP32-C3 SuperMini sending dummy
+telemetry over ESP-NOW channel 1 to a LILYGO T-A7670G R2. The A7670G relayed
+the packets over a Public Mobile LTE connection through a Cloudflare quick
+tunnel. Packet sequence, current, voltage, acceleration, and fake GPS values
+arrived intact at the dashboard.
+
+Use the matching firmware sketches from
+[`UTSM-proto/utsm-telem-firmware`](https://github.com/UTSM-proto/utsm-telem-firmware):
+
+- `lte_relay/lte_relay.ino` on the A7670G, with `LTE_DUMMY_TEST_MODE = false`
+- `telem-v1/espnow_dummy_sender/espnow_dummy_sender.ino` on the C3 for the
+  full-path dummy test
+- `telem-v1/telemetry_gpio1_led_sd_per_session.ino` on the C3 to return to
+  real sensor and SD-backed telemetry
+
+The successful full-path serial indicators are:
+
+```text
+C3: C3 ESP-NOW queued seq=N
+Relay: Dashboard POST status=202
+Relay: LIVE seq=N delivered
+```
+
+The relay and server must use the same API key. The relay endpoint must contain
+the complete quick-tunnel URL ending in `/api/live/telemetry`.
