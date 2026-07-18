@@ -202,3 +202,52 @@ python simulate_speed_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\a
 - GPS acceleration is low bandwidth because it comes from GPX speed changes.
 - MPU dynamic acceleration is useful for diagnostics, but sensor orientation and gravity compensation are still imperfect without gyro fusion or a known mounting calibration.
 - Generated outputs, caches, and local scratch artifacts should stay out of Git.
+
+## Live LTE Dashboard
+
+The live page is separate from the generated historical replay dashboard. It
+runs a small FastAPI server that accepts one telemetry record at a time, keeps
+the most recent records in memory, and sends them to connected browsers over a
+WebSocket.
+
+Start it in PowerShell:
+
+```powershell
+$env:UTSM_TELEMETRY_API_KEY = "replace-this-for-real-tests"
+python -m uvicorn live_dashboard.app:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://127.0.0.1:8000/live`. Test the complete page without hardware in a
+second PowerShell window:
+
+```powershell
+python send_live_test.py --api-key "replace-this-for-real-tests" --gps
+```
+
+The page includes:
+
+- current, voltage, power, and acceleration gauges
+- four rolling live charts
+- a table preserving the current telemetry CSV column names
+- an optional live map and trail when latitude/longitude arrive
+- a stale-data indicator when the car has not reported for five seconds
+
+The API endpoint is `POST /api/live/telemetry` and requires the
+`X-Telemetry-Key` header. Records retain the existing seven CSV fields and add
+packet identity plus optional `latitude` and `longitude` fields.
+
+### Reaching the local server from LTE
+
+`localhost` and private Wi-Fi addresses are not reachable from a cellular
+modem. For a development test, expose port 8000 with a temporary HTTPS tunnel.
+For example, after installing `cloudflared`:
+
+```powershell
+cloudflared tunnel --url http://localhost:8000
+```
+
+Copy the generated `https://...trycloudflare.com` hostname into the relay's
+`TELEMETRY_ENDPOINT`, followed by `/api/live/telemetry`. Use the same API key in
+the relay configuration and the `UTSM_TELEMETRY_API_KEY` environment variable.
+Quick tunnel hostnames change when the tunnel restarts and are intended only
+for development.
