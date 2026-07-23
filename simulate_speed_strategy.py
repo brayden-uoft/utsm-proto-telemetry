@@ -17,9 +17,9 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from analyze_strategy import build_laps
 from utsm_telemetry import (
     FORWARD_AXIS_CHOICES,
+    build_laps,
     build_full_run_distance,
     build_motor_config,
     build_strategy_report,
@@ -88,7 +88,16 @@ def parse_args() -> argparse.Namespace:
 def load_full_run(args: argparse.Namespace) -> pd.DataFrame:
     gps_df = read_gpx(args.gps)
     telem_df = read_telemetry(args.telemetry)
-    gps_laps, telem_laps, _ = build_laps(gps_df, telem_df, args)
+    gps_laps, telem_laps, _ = build_laps(
+        gps_df,
+        telem_df,
+        laps=args.laps,
+        split_method=args.split_method,
+        start_time=args.start_time,
+        time_offset_ms=args.time_offset_ms,
+        tolerance_sec=args.tolerance_sec,
+        lap_times=args.lap_times,
+    )
 
     rows = []
     distance_offset = 0.0
