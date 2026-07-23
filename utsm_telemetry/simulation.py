@@ -159,6 +159,18 @@ def build_strategy_segments(df: pd.DataFrame, segments: int) -> pd.DataFrame:
     return out
 
 
+def build_strategy_segments_by_distance(df: pd.DataFrame, strategy_step_m: float) -> pd.DataFrame:
+    """Build strategy segments on a fixed distance grid."""
+    if strategy_step_m <= 0:
+        raise ValueError("strategy_step_m must be positive.")
+    df = build_full_run_distance(df)
+    total_dist = float(df["run_cumdist_m"].iloc[-1])
+    if total_dist <= 0:
+        raise ValueError("run_cumdist_m must be positive.")
+    segments = max(1, int(math.ceil(total_dist / strategy_step_m)))
+    return build_strategy_segments(df, segments=segments)
+
+
 def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[str, object]:
     df = build_full_run_distance(df)
     fit = pd.DataFrame({
@@ -182,6 +194,9 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
     fit["is_accelerate"] = (fit["action"] == ACTION_ACCELERATE).astype(float)
     fit["is_hold"] = (fit["action"] == ACTION_HOLD).astype(float)
     fit["is_coast"] = (fit["action"] == ACTION_COAST).astype(float)
+    low_current_cutoff = float(fit["current_mA"].quantile(0.35))
+    coast_like = (fit["gps_accel_m_s2"] < -0.03) & (fit["current_mA"] <= low_current_cutoff)
+    coast_sample_count = int(max(float(fit["is_coast"].sum()), float(coast_like.sum())))
 
     design = _design_matrix(fit)
     current_coeffs = _solve_ridge(design, fit["current_mA"].to_numpy(dtype=float), ridge)
@@ -207,6 +222,7 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
         "on_current_mA": max(on_current_mA, cruise_current_mA, 1000.0),
         "cruise_current_mA": max(cruise_current_mA, 0.0),
         "median_voltage_v": median_voltage_v,
+        "coast_sample_count": coast_sample_count,
     }
 
 
@@ -330,6 +346,7 @@ def optimize_speed_profile(
     current_penalty_weight: float = 5.0,
     motor_config: dict[str, float | str] | None = None,
     start_speed_kph: float = 0.0,
+    min_time_sec: float | None = None,
 ) -> pd.DataFrame:
     if time_budget_sec <= 0:
         raise ValueError("time_budget_sec must be positive.")
@@ -474,6 +491,19 @@ def optimize_speed_profile(
         out["pred_peak_current_mA"] = [row["peak_current_mA"] for row in electrical_rows]
         out["pred_on_current_mA"] = [row["on_current_mA"] for row in electrical_rows]
         out["throttle_duty"] = [row["throttle_duty"] for row in electrical_rows]
+        out["throttle_level"] = out["throttle_duty"]
+        out["pulse_duration_s"] = [
+            _fuse_burst_duration_s(time_s, duty) if action != ACTION_COAST else 0.0
+            for time_s, duty, action in zip(out["segment_time_s"], out["throttle_duty"], out["action"])
+        ]
+        out["coast_duration_s"] = [
+            float(time_s) if action == ACTION_COAST else max(float(time_s) * (1.0 - float(duty)), 0.0)
+            for time_s, duty, action in zip(out["segment_time_s"], out["throttle_duty"], out["action"])
+        ]
+        out["coast_speed_drop_kph"] = [
+            max(float(entry) - float(target), 0.0) if action == ACTION_COAST else 0.0
+            for entry, target, action in zip(out["entry_speed_kph"], out["target_speed_kph"], out["action"])
+        ]
         out["pred_energy_j"] = out["pred_power_w"] * out["segment_time_s"]
         out["cum_pred_energy_j"] = out["pred_energy_j"].cumsum()
         out["cum_pred_time_s"] = out["segment_time_s"].cumsum()
@@ -543,6 +573,10 @@ def build_strategy_samples(df: pd.DataFrame, profile_df: pd.DataFrame) -> pd.Dat
     samples["pred_peak_current_mA"] = mapped.get("pred_peak_current_mA", mapped["pred_current_mA"])
     samples["pred_on_current_mA"] = mapped.get("pred_on_current_mA", mapped["pred_current_mA"])
     samples["throttle_duty"] = mapped.get("throttle_duty", 0.0)
+    samples["throttle_level"] = mapped.get("throttle_level", samples["throttle_duty"])
+    samples["pulse_duration_s"] = mapped.get("pulse_duration_s", 0.0)
+    samples["coast_duration_s"] = mapped.get("coast_duration_s", 0.0)
+    samples["coast_speed_drop_kph"] = mapped.get("coast_speed_drop_kph", 0.0)
     samples["pred_power_w"] = mapped["pred_power_w"]
     samples["pred_energy_j"] = pd.to_numeric(samples["dt_s"], errors="coerce").fillna(0.0) * mapped["pred_power_w"]
     samples["pred_cum_energy_j"] = samples["pred_energy_j"].cumsum()

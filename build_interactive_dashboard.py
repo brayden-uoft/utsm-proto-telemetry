@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import xml.etree.ElementTree as ET
 from typing import Any
 
 try:
@@ -21,10 +22,10 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from analyze_strategy import build_laps
 from utsm_telemetry import (
     FORWARD_AXIS_CHOICES,
     add_xy,
+    build_laps,
     build_full_run_distance,
     build_motor_config,
     build_strategy_report,
@@ -42,6 +43,7 @@ from utsm_telemetry import (
 )
 
 DEFAULT_RUNS_DIR = os.path.join("data", "runs")
+DEFAULT_TRACKS_DIR = os.path.join("data", "tracks")
 DEFAULT_OUTPUT = os.path.join("outputs", "telemetry_strategy_dashboard.html")
 
 METRICS = {
@@ -95,6 +97,14 @@ def parse_args() -> argparse.Namespace:
             "Directory containing one subfolder per run, each with exactly one "
             ".gpx file and one telemetry .csv file. New runs are picked up "
             "automatically just by adding a folder here (default: data/runs)."
+        ),
+    )
+    parser.add_argument(
+        "--tracks-dir",
+        default=DEFAULT_TRACKS_DIR,
+        help=(
+            "Directory containing reference-track subfolders. Files ending in "
+            "-centerline.gpx are added to the dashboard map selector."
         ),
     )
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT)
@@ -218,10 +228,80 @@ def resolve_run_specs(args: argparse.Namespace) -> list[dict[str, str]]:
     return runs
 
 
+def discover_reference_tracks(tracks_dir: str) -> list[dict[str, str]]:
+    """Discover geometry-only GPX centerlines for the dashboard map selector."""
+    if not os.path.isdir(tracks_dir):
+        return []
+    tracks: list[dict[str, str]] = []
+    for entry in sorted(os.listdir(tracks_dir)):
+        track_dir = os.path.join(tracks_dir, entry)
+        if not os.path.isdir(track_dir) or entry.startswith("."):
+            continue
+        files = sorted(
+            name for name in os.listdir(track_dir)
+            if name.lower().endswith("-centerline.gpx")
+        )
+        if len(files) != 1:
+            if files:
+                print(
+                    f"WARNING: skipping reference track '{entry}' - expected one "
+                    f"*-centerline.gpx file, found {len(files)}.",
+                    file=sys.stderr,
+                )
+            continue
+        tracks.append({
+            "id": _slugify(entry),
+            "label": _prettify(entry),
+            "gps": os.path.join(track_dir, files[0]),
+        })
+    return tracks
+
+
+def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
+    """Load an untimed GPX as map geometry without pretending it is telemetry."""
+    root = ET.parse(spec["gps"]).getroot()
+    namespace = {"gpx": "http://www.topografix.com/GPX/1/1"}
+    points = [
+        (float(node.attrib["lat"]), float(node.attrib["lon"]))
+        for node in root.findall("gpx:trk/gpx:trkseg/gpx:trkpt", namespace)
+    ]
+    if len(points) < 3:
+        raise ValueError(f"Reference track '{spec['gps']}' has fewer than three points.")
+    frame = pd.DataFrame(points, columns=["lat", "lon"])
+    xy = add_xy(frame)
+    samples = [
+        {"x": finite_float(row.x, 2), "y": finite_float(row.y, 2)}
+        for row in xy.itertuples(index=False)
+    ]
+    segment_lengths = np.hypot(np.diff(xy["x"]), np.diff(xy["y"]))
+    length_m = float(np.sum(segment_lengths))
+    return {
+        "id": spec["id"],
+        "label": spec["label"],
+        "meta": {
+            "gps": spec["gps"],
+            "sample_count": len(samples),
+            "length_m": finite_float(length_m, 1),
+            "geometry_only": True,
+        },
+        "samples": samples,
+        "domains": {"x": domain(xy["x"]), "y": domain(xy["y"])},
+    }
+
+
 def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     gps_df = read_gpx(spec["gps"])
     telem_df = read_telemetry(spec["telemetry"])
-    gps_laps, telem_laps, _ = build_laps(gps_df, telem_df, args)
+    gps_laps, telem_laps, _ = build_laps(
+        gps_df,
+        telem_df,
+        laps=args.laps,
+        split_method=args.split_method,
+        start_time=args.start_time,
+        time_offset_ms=args.time_offset_ms,
+        tolerance_sec=args.tolerance_sec,
+        lap_times=args.lap_times,
+    )
 
     rows = []
     for lap_num, (lap_gps, lap_telem) in enumerate(zip(gps_laps, telem_laps), start=1):
@@ -739,12 +819,19 @@ def make_run_payload(
     }
 
 
-def make_payload(run_payloads: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
+def make_payload(
+    run_payloads: list[dict[str, Any]],
+    args: argparse.Namespace,
+    reference_tracks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    reference_tracks = reference_tracks or []
     return {
         "title": "UTSM Strategy Dashboard",
         "defaultRun": run_payloads[0]["id"],
         "runOrder": [run["id"] for run in run_payloads],
         "runs": {run["id"]: run for run in run_payloads},
+        "trackOrder": [track["id"] for track in reference_tracks],
+        "tracks": {track["id"]: track for track in reference_tracks},
         "metrics": {
             key: {
                 "label": spec["label"],
@@ -1033,6 +1120,9 @@ def build_html(payload: dict[str, Any]) -> str:
           <label>Run
             <select id="runSelect"></select>
           </label>
+          <label>Map
+            <select id="trackSelect"></select>
+          </label>
           <input id="timeSlider" class="slider-control" type="range" min="0" max="0" value="0" step="0.1">
           <button id="playButton" type="button">Play</button>
           <label>Metric
@@ -1103,6 +1193,7 @@ def build_html(payload: dict[str, Any]) -> str:
     const metricKeys = Object.keys(metricSpecs).filter(k => metricSpecs[k].map_selectable !== false);
     const state = {{
       runId: DATA.defaultRun,
+      trackId: "run",
       index: 0,
       metric: "speed",
       playing: false,
@@ -1112,6 +1203,7 @@ def build_html(payload: dict[str, Any]) -> str:
     const el = {{
       metaText: document.getElementById("metaText"),
       runSelect: document.getElementById("runSelect"),
+      trackSelect: document.getElementById("trackSelect"),
       timeSlider: document.getElementById("timeSlider"),
       playButton: document.getElementById("playButton"),
       metricSelect: document.getElementById("metricSelect"),
@@ -1157,6 +1249,14 @@ def build_html(payload: dict[str, Any]) -> str:
       return DATA.runs[state.runId];
     }}
 
+    function getReferenceTrack() {{
+      return state.trackId === "run" ? null : DATA.tracks[state.trackId];
+    }}
+
+    function getMapGeometry() {{
+      return getReferenceTrack() || getRun();
+    }}
+
     function clamp(v, lo, hi) {{
       return Math.max(lo, Math.min(hi, v));
     }}
@@ -1169,11 +1269,11 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function xMap(x) {{
-      return scaleLinear(x, getRun().domains.x, [PAD, W - PAD]);
+      return scaleLinear(x, getMapGeometry().domains.x, [PAD, W - PAD]);
     }}
 
     function yMap(y) {{
-      return scaleLinear(y, getRun().domains.y, [H - PAD, PAD]);
+      return scaleLinear(y, getMapGeometry().domains.y, [H - PAD, PAD]);
     }}
 
     function chartX(t) {{
@@ -1249,11 +1349,15 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawFullTrack() {{
-      const samples = runSamples();
+      const samples = getMapGeometry().samples;
       el.fullTrack.setAttribute("d", linePath(samples, s => xMap(s.x), s => yMap(s.y)));
     }}
 
     function drawBoundaries() {{
+      if (getReferenceTrack()) {{
+        el.lapBoundaryLayer.innerHTML = "";
+        return;
+      }}
       const samples = runSamples();
       el.lapBoundaryLayer.innerHTML = getRun().laps.map(lap => {{
         const s = samples[lap.start];
@@ -1262,6 +1366,11 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawStrategy(index) {{
+      if (getReferenceTrack()) {{
+        el.strategyLayer.innerHTML = "";
+        el.labelLayer.innerHTML = "";
+        return;
+      }}
       const samples = runSamples();
       const range = currentLapRange(index);
       if (!el.showStrategy.checked) {{
@@ -1298,6 +1407,10 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawTrail(index) {{
+      if (getReferenceTrack()) {{
+        el.trailLayer.innerHTML = "";
+        return;
+      }}
       const samples = runSamples();
       const range = currentLapRange(index);
       const rows = samples.slice(range.start, index + 1);
@@ -1429,34 +1542,55 @@ def build_html(payload: dict[str, Any]) -> str:
     function update(index) {{
       const run = getRun();
       const samples = runSamples();
+      const referenceTrack = getReferenceTrack();
       state.index = clamp(index, 0, samples.length - 1);
       const row = samples[state.index];
       const lapRange = currentLapRange(state.index);
       const lapStart = samples[lapRange.start];
       el.timeSlider.value = row.t;
-      el.carMarker.setAttribute("cx", xMap(row.x));
-      el.carMarker.setAttribute("cy", yMap(row.y));
-      el.lapStartMarker.setAttribute("cx", xMap(lapStart.x));
-      el.lapStartMarker.setAttribute("cy", yMap(lapStart.y));
-      drawStrategy(state.index);
-      drawTrail(state.index);
-      drawBoundaries();
+      if (referenceTrack) {{
+        const start = referenceTrack.samples[0];
+        el.carMarker.style.display = "none";
+        el.lapStartMarker.style.display = "";
+        el.lapStartMarker.setAttribute("cx", xMap(start.x));
+        el.lapStartMarker.setAttribute("cy", yMap(start.y));
+        drawStrategy(state.index);
+        drawTrail(state.index);
+        drawBoundaries();
+        el.mapReadout.textContent = `${{referenceTrack.label}} | geometry only | ${{referenceTrack.meta.length_m.toFixed(1)}} m | ${{referenceTrack.meta.sample_count}} points | strategy awaits recorded telemetry or a transferable vehicle model`;
+        el.metricLegend.style.display = "none";
+      }} else {{
+        el.carMarker.style.display = "";
+        el.lapStartMarker.style.display = "";
+        el.carMarker.setAttribute("cx", xMap(row.x));
+        el.carMarker.setAttribute("cy", yMap(row.y));
+        el.lapStartMarker.setAttribute("cx", xMap(lapStart.x));
+        el.lapStartMarker.setAttribute("cy", yMap(lapStart.y));
+        drawStrategy(state.index);
+        drawTrail(state.index);
+        drawBoundaries();
+      }}
       updateCharts(state.index);
       el.timeText.textContent = `t=${{row.t.toFixed(1)}}s / ${{run.meta.duration_s.toFixed(1)}}s`;
       const metric = metricSpecs[state.metric];
       const metricValue = row[metric.field];
-      el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  pulse=${{row.pulseDuration.toFixed(1)}}s coast=${{row.coastDuration.toFixed(1)}}s  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
+      if (!referenceTrack) {{
+        el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  pulse=${{row.pulseDuration.toFixed(1)}}s coast=${{row.coastDuration.toFixed(1)}}s  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
+      }}
       el.lapValue.textContent = String(row.lap);
       el.strategyValue.textContent = row.strategyAction;
       el.targetSpeedValue.textContent = format(row.targetSpeed, 1, " km/h");
       el.predCurrentValue.textContent = format(row.predCurrent, 0, " mA");
       el.predPowerValue.textContent = format(row.predPower, 1, " W");
-      const domain = run.domains.metrics[state.metric];
-      el.legendMin.textContent = domain[0].toFixed(1);
-      el.legendMax.textContent = domain[1].toFixed(1);
-      el.legendTitle.textContent = `Trail color: ${{metric.label}} (${{metric.unit}})`;
-      el.metricLegend.style.display = "grid";
-      el.metaText.textContent = `${{run.label}} | ${{run.meta.sample_count}} samples | ${{run.meta.duration_s.toFixed(1)}}s | energy delta ${{run.strategy.delta_energy_pct.toFixed(2)}}%`;
+      if (!referenceTrack) {{
+        const domain = run.domains.metrics[state.metric];
+        el.legendMin.textContent = domain[0].toFixed(1);
+        el.legendMax.textContent = domain[1].toFixed(1);
+        el.legendTitle.textContent = `Trail color: ${{metric.label}} (${{metric.unit}})`;
+        el.metricLegend.style.display = "grid";
+      }}
+      const previewText = referenceTrack ? ` | map preview: ${{referenceTrack.label}} (geometry only)` : "";
+      el.metaText.textContent = `${{run.label}} | ${{run.meta.sample_count}} samples | ${{run.meta.duration_s.toFixed(1)}}s | energy delta ${{run.strategy.delta_energy_pct.toFixed(2)}}%${{previewText}}`;
     }}
 
     function buildLegends() {{
@@ -1505,6 +1639,12 @@ def build_html(payload: dict[str, Any]) -> str:
       update(0);
     }}
 
+    function switchMap(trackId) {{
+      state.trackId = trackId;
+      drawFullTrack();
+      update(state.index);
+    }}
+
     function init() {{
       DATA.runOrder.forEach(runId => {{
         const run = DATA.runs[runId];
@@ -1512,6 +1652,17 @@ def build_html(payload: dict[str, Any]) -> str:
         option.value = runId;
         option.textContent = run.label;
         el.runSelect.appendChild(option);
+      }});
+      const runMapOption = document.createElement("option");
+      runMapOption.value = "run";
+      runMapOption.textContent = "Selected run GPS";
+      el.trackSelect.appendChild(runMapOption);
+      DATA.trackOrder.forEach(trackId => {{
+        const track = DATA.tracks[trackId];
+        const option = document.createElement("option");
+        option.value = trackId;
+        option.textContent = `${{track.label}} (reference)`;
+        el.trackSelect.appendChild(option);
       }});
       metricKeys.forEach(key => {{
         const option = document.createElement("option");
@@ -1524,6 +1675,7 @@ def build_html(payload: dict[str, Any]) -> str:
       buildLegends();
       drawMapGrid();
       el.runSelect.addEventListener("change", e => switchRun(e.target.value));
+      el.trackSelect.addEventListener("change", e => switchMap(e.target.value));
       el.timeSlider.addEventListener("input", e => update(nearestIndexByTime(Number(e.target.value))));
       el.metricSelect.addEventListener("change", e => {{
         state.metric = e.target.value;
@@ -1555,7 +1707,8 @@ def main() -> int:
     for spec in run_specs:
         df, strategy_profile, strategy_report = load_single_run(spec, args)
         run_payloads.append(make_run_payload(spec, df, strategy_profile, strategy_report, args))
-    payload = make_payload(run_payloads, args)
+    reference_tracks = [load_reference_track(spec) for spec in discover_reference_tracks(args.tracks_dir)]
+    payload = make_payload(run_payloads, args, reference_tracks)
     html = build_html(payload)
     out_dir = os.path.dirname(args.output)
     if out_dir:
@@ -1565,6 +1718,11 @@ def main() -> int:
     print(f"Wrote interactive dashboard: {args.output}")
     for run in run_payloads:
         print(f"{run['label']}: {run['meta']['sample_count']} samples, {run['meta']['duration_s']}s")
+    for track in reference_tracks:
+        print(
+            f"Reference track {track['label']}: {track['meta']['sample_count']} points, "
+            f"{track['meta']['length_m']}m"
+        )
     return 0
 
 

@@ -59,6 +59,14 @@ Currently packaged:
 - `data\runs\morning-run\` - `Utsm.gpx` + `telemetry_20260411_112302.csv`
 - `data\runs\afternoon-run\` - `Utsm-2.gpx` + `telemetry_20260411_122713.csv`
 
+Reference tracks without telemetry live separately under `data\tracks\`. The
+dashboard discovers one `*-centerline.gpx` file per track folder and adds it to
+the **Map** selector without treating it as a recorded run. Currently packaged:
+
+- `data\tracks\autodrome-chaudiere\` - a smoothed 399.3 m centerline for
+  Autodrome Chaudière near Québec City, resampled to 80 points at approximately
+  5 m spacing
+
 Use `--laps 3 --split-method start` as the standard replay/strategy path. The fourth recorded pass is currently treated as unreliable for strategy work, so the dashboard and simulator default to the first three clean laps.
 
 To point the dashboard at a different folder of runs, pass `--runs-dir`. To
@@ -83,6 +91,7 @@ python build_interactive_dashboard.py --laps 3 --strategy-step-m 50 --display-re
 Open `outputs\telemetry_strategy_dashboard.html` in a browser. It is a self-contained HTML file with:
 
 - run switcher for the morning and afternoon datasets
+- map switcher for recorded-run GPS or packaged geometry-only reference tracks
 - one manual time slider per selected run
 - play/pause replay
 - full-course gray reference trace
@@ -111,6 +120,44 @@ Acceleration is split into two separate channels:
 - `MPU dynamic acceleration`: MPU-6050 axis data scaled as milli-g, bias/gravity corrected with a rolling median, and kept as a diagnostic vibration/response channel.
 
 The dashboard payload also includes MPU axis/sign diagnostic correlations for `ax`, `-ax`, `ay`, `-ay`, `az`, and `-az`.
+
+When a reference track is selected, the map intentionally shows only the
+centerline, lap length, and point count. The charts continue to describe the
+selected recorded run. No current, speed, or optimized strategy is invented
+for an untimed Google Earth trace; generating a defensible Autodrome strategy
+still requires either recorded telemetry there or an explicitly transferable
+vehicle model.
+
+## Reference Track Preprocessing
+
+The original Autodrome Chaudière Google Earth export contains two coarse
+closed paths named `Outer Ring` and `Inner Ring`, not a drivable centerline.
+Regenerate the packaged track and a visual audit image with:
+
+```powershell
+python preprocess_track.py `
+  data\tracks\autodrome-chaudiere\google-earth-boundaries.gpx `
+  data\tracks\autodrome-chaudiere\autodrome-chaudiere-centerline.gpx `
+  --preview outputs\autodrome-chaudiere-preprocessing.png `
+  --spacing-m 5 `
+  --smooth-window-m 12
+```
+
+The preprocessing stages are:
+
+1. Parse the inner and outer GPX tracks and remove duplicate closing points.
+2. Project latitude/longitude into a local metre coordinate system.
+3. Normalize ring direction and cyclically align their start phases.
+4. Resample both boundaries uniformly and average paired points.
+5. Apply a periodic Gaussian smoother so the closed seam remains continuous.
+6. Resample the smoothed centerline at fixed spacing and export an untimed,
+   geometry-only GPX.
+
+For the supplied source this produces a 399.3 m closed centerline from a
+450.6 m outer boundary and 357.2 m inner boundary. The result closely matches
+the published 0.4 km track length, but it remains satellite-traced geometry;
+replace or calibrate it against a real driven GPS lap before using metre-level
+driver guidance.
 
 The total-energy chart is cumulative run joules versus elapsed time. It spans the whole run and does not reset at lap boundaries.
 

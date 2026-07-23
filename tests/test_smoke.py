@@ -16,7 +16,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 from argparse import Namespace
-from build_interactive_dashboard import build_html, make_payload, make_run_payload
+from build_interactive_dashboard import (
+    build_html,
+    discover_reference_tracks,
+    load_reference_track,
+    make_payload,
+    make_run_payload,
+)
+from preprocess_track import build_centerline, closed_length
 from utsm_telemetry.core import (
     add_xy,
     compute_distance,
@@ -129,6 +136,34 @@ class TestAddXY(unittest.TestCase):
         xy = add_xy(gps)
         self.assertTrue((xy["x"].diff().dropna() >= 0).all())
         self.assertTrue((xy["y"].diff().dropna() >= 0).all())
+
+
+class TestTrackPreprocessing(unittest.TestCase):
+    def test_averages_smooth_closed_boundaries_at_fixed_spacing(self):
+        angles = np.linspace(0.0, 2.0 * math.pi, 48, endpoint=False)
+        outer = np.column_stack((80.0 * np.cos(angles), 55.0 * np.sin(angles)))
+        inner = np.column_stack((60.0 * np.cos(angles), 35.0 * np.sin(angles)))
+        centerline, metrics = build_centerline(
+            outer,
+            np.roll(inner, 13, axis=0),
+            alignment_samples=240,
+            smooth_window_m=8.0,
+            spacing_m=5.0,
+        )
+        self.assertGreater(len(centerline), 50)
+        self.assertAlmostEqual(float(metrics["mean_spacing_m"]), 5.0, delta=0.15)
+        self.assertAlmostEqual(np.max(centerline[:, 0]), 70.0, delta=2.0)
+        self.assertAlmostEqual(np.max(centerline[:, 1]), 45.0, delta=2.0)
+        self.assertAlmostEqual(closed_length(centerline), float(metrics["centerline_length_m"]), places=6)
+
+    def test_packaged_autodrome_is_geometry_only_reference_track(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        specs = discover_reference_tracks(os.path.join(root, "data", "tracks"))
+        autodrome = next(spec for spec in specs if spec["id"] == "autodrome-chaudiere")
+        payload = load_reference_track(autodrome)
+        self.assertTrue(payload["meta"]["geometry_only"])
+        self.assertEqual(payload["meta"]["sample_count"], 81)
+        self.assertAlmostEqual(payload["meta"]["length_m"], 399.3, delta=1.0)
 
 
 class TestComputeDistance(unittest.TestCase):
