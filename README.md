@@ -63,9 +63,9 @@ Reference tracks without telemetry live separately under `data\tracks\`. The
 dashboard discovers one `*-centerline.gpx` file per track folder and adds it to
 the **Map** selector without treating it as a recorded run. Currently packaged:
 
-- `data\tracks\autodrome-chaudiere\` - a smoothed 399.3 m centerline for
-  Autodrome Chaudière near Québec City, resampled to 80 points at approximately
-  5 m spacing
+- `data\tracks\autodrome-chaudiere\` - a smoothed 399.3 m centerline and
+  model-derived efficiency strategy for Autodrome Chaudière near Québec City,
+  resampled to 80 points at approximately 5 m spacing
 
 Use `--laps 3 --split-method start` as the standard replay/strategy path. The fourth recorded pass is currently treated as unreliable for strategy work, so the dashboard and simulator default to the first three clean laps.
 
@@ -121,12 +121,53 @@ Acceleration is split into two separate channels:
 
 The dashboard payload also includes MPU axis/sign diagnostic correlations for `ax`, `-ax`, `ay`, `-ay`, `az`, and `-az`.
 
-When a reference track is selected, the map intentionally shows only the
-centerline, lap length, and point count. The charts continue to describe the
-selected recorded run. No current, speed, or optimized strategy is invented
-for an untimed Google Earth trace; generating a defensible Autodrome strategy
-still requires either recorded telemetry there or an explicitly transferable
-vehicle model.
+When a reference track is selected, the charts continue to describe the
+selected recorded run. A reference track can also include a separately
+generated model strategy: the Autodrome map colors its centerline by target
+speed and clearly labels the result as model-derived rather than measured
+telemetry.
+
+## Autodrome Maximum-Efficiency Strategy
+
+Regenerate the initial Autodrome strategy from the packaged centerline and the
+existing afternoon vehicle telemetry model:
+
+```powershell
+python generate_reference_strategy.py `
+  data\tracks\autodrome-chaudiere\autodrome-chaudiere-centerline.gpx `
+  data\runs\afternoon-run\Utsm-2.gpx `
+  data\runs\afternoon-run\telemetry_20260411_122713.csv `
+  --output-prefix data\tracks\autodrome-chaudiere\autodrome-chaudiere `
+  --preview outputs\autodrome-chaudiere-efficiency-strategy.png `
+  --model-laps 3 `
+  --target-lap-time-sec 60 `
+  --strategy-step-m 20 `
+  --speed-min-kph 8 `
+  --speed-max-kph 35 `
+  --start-speed-kph 24
+```
+
+The optimizer minimizes predicted electrical energy subject to the 60-second
+maximum lap time, closed-loop start/end speed, per-segment speed-change, motor,
+and fuse constraints. A lap-time constraint is required for a useful result:
+without one, maximum efficiency degenerates to driving at the minimum allowed
+speed.
+
+To run the demo:
+
+```powershell
+python build_interactive_dashboard.py --laps 3 --output outputs\telemetry_strategy_dashboard.html
+Start-Process outputs\telemetry_strategy_dashboard.html
+```
+
+Choose **Autodrome Chaudière** from the dashboard's **Map** selector. The
+colored centerline is the target-speed curve; purple is slower and yellow is
+faster. The map readout shows the predicted lap time and energy.
+
+This is an initial transferred-model strategy, not validated Autodrome
+telemetry. The generator removes the source circuit's absolute-position model
+term before transfer, but the vehicle and surface assumptions still need to be
+refit after the first real Autodrome laps.
 
 ## Reference Track Preprocessing
 

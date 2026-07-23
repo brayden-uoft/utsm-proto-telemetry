@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 
 try:
@@ -258,7 +259,7 @@ def discover_reference_tracks(tracks_dir: str) -> list[dict[str, str]]:
 
 
 def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
-    """Load an untimed GPX as map geometry without pretending it is telemetry."""
+    """Load reference geometry and an optional model-derived strategy overlay."""
     root = ET.parse(spec["gps"]).getroot()
     namespace = {"gpx": "http://www.topografix.com/GPX/1/1"}
     points = [
@@ -275,6 +276,56 @@ def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
     ]
     segment_lengths = np.hypot(np.diff(xy["x"]), np.diff(xy["y"]))
     length_m = float(np.sum(segment_lengths))
+    strategy_meta: dict[str, Any] | None = None
+    centerline_path = Path(spec["gps"])
+    stem = centerline_path.name.removesuffix("-centerline.gpx")
+    strategy_path = centerline_path.with_name(f"{stem}-efficiency-strategy.csv")
+    segments_path = centerline_path.with_name(f"{stem}-strategy-segments.csv")
+    if strategy_path.is_file() and segments_path.is_file():
+        strategy_points = pd.read_csv(strategy_path)
+        strategy_segments = pd.read_csv(segments_path)
+        required = {"x", "y", "target_speed_kph", "action", "pred_current_mA", "pred_power_w"}
+        missing = required.difference(strategy_points.columns)
+        if missing:
+            raise ValueError(
+                f"Reference strategy '{strategy_path}' is missing: {', '.join(sorted(missing))}"
+            )
+        samples = [
+            {
+                "x": finite_float(row.x, 2),
+                "y": finite_float(row.y, 2),
+                "targetSpeed": finite_float(row.target_speed_kph, 2),
+                "strategyAction": str(row.action),
+                "predCurrent": finite_float(row.pred_current_mA, 0),
+                "predPower": finite_float(row.pred_power_w, 2),
+            }
+            for row in strategy_points.itertuples(index=False)
+        ]
+        if "distance_m" in strategy_points.columns:
+            length_m = float(pd.to_numeric(strategy_points["distance_m"], errors="coerce").max())
+        speed = pd.to_numeric(strategy_points["target_speed_kph"], errors="coerce")
+        strategy_meta = {
+            "source": str(strategy_path),
+            "model_derived": True,
+            "target_speed_min_kph": finite_float(speed.min(), 1),
+            "target_speed_max_kph": finite_float(speed.max(), 1),
+            "target_speed_mean_kph": finite_float(speed.mean(), 1),
+        }
+        time_budget = pd.to_numeric(
+            strategy_segments.get("time_budget_sec", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        if time_budget.empty:
+            raise ValueError(f"Reference strategy '{segments_path}' has no time budget.")
+        strategy_meta.update({
+            "target_lap_time_s": finite_float(time_budget.iloc[0], 1),
+            "predicted_lap_time_s": finite_float(
+                pd.to_numeric(strategy_segments["segment_time_s"], errors="coerce").sum(), 1
+            ),
+            "predicted_energy_j": finite_float(
+                pd.to_numeric(strategy_segments["pred_energy_j"], errors="coerce").sum(), 1
+            ),
+        })
     return {
         "id": spec["id"],
         "label": spec["label"],
@@ -283,9 +334,17 @@ def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
             "sample_count": len(samples),
             "length_m": finite_float(length_m, 1),
             "geometry_only": True,
+            "strategy": strategy_meta,
         },
         "samples": samples,
-        "domains": {"x": domain(xy["x"]), "y": domain(xy["y"])},
+        "domains": {
+            "x": domain(pd.Series([sample["x"] for sample in samples])),
+            "y": domain(pd.Series([sample["y"] for sample in samples])),
+            "targetSpeed": (
+                domain(pd.Series([sample["targetSpeed"] for sample in samples]), min_zero=True)
+                if strategy_meta else None
+            ),
+        },
     }
 
 
@@ -1318,8 +1377,8 @@ def build_html(payload: dict[str, Any]) -> str:
       return getRun().laps.find(item => item.lap === lap);
     }}
 
-    function colorForMetric(value, key) {{
-      const [lo, hi] = getRun().domains.metrics[key];
+    function colorForDomain(value, valueDomain) {{
+      const [lo, hi] = valueDomain;
       const ratio = clamp((value - lo) / (hi - lo || 1), 0, 1);
       const stops = [[45,10,115],[126,3,168],[204,71,120],[248,149,64],[240,249,33]];
       const scaled = ratio * (stops.length - 1);
@@ -1329,6 +1388,10 @@ def build_html(payload: dict[str, Any]) -> str:
       const b = stops[idx + 1];
       const rgb = a.map((v, i) => Math.round(v + (b[i] - v) * local));
       return `rgb(${{rgb[0]}},${{rgb[1]}},${{rgb[2]}})`;
+    }}
+
+    function colorForMetric(value, key) {{
+      return colorForDomain(value, getRun().domains.metrics[key]);
     }}
 
     function format(value, digits, suffix) {{
@@ -1366,9 +1429,22 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawStrategy(index) {{
-      if (getReferenceTrack()) {{
-        el.strategyLayer.innerHTML = "";
+      const referenceTrack = getReferenceTrack();
+      if (referenceTrack) {{
         el.labelLayer.innerHTML = "";
+        if (!el.showStrategy.checked || !referenceTrack.meta.strategy) {{
+          el.strategyLayer.innerHTML = "";
+          return;
+        }}
+        const rows = referenceTrack.samples;
+        let markup = "";
+        for (let i = 1; i < rows.length; i++) {{
+          const a = rows[i - 1];
+          const b = rows[i];
+          const color = colorForDomain(b.targetSpeed, referenceTrack.domains.targetSpeed);
+          markup += `<line x1="${{xMap(a.x).toFixed(1)}}" y1="${{yMap(a.y).toFixed(1)}}" x2="${{xMap(b.x).toFixed(1)}}" y2="${{yMap(b.y).toFixed(1)}}" stroke="${{color}}" stroke-width="8" stroke-linecap="round" opacity="0.96"/>`;
+        }}
+        el.strategyLayer.innerHTML = markup;
         return;
       }}
       const samples = runSamples();
@@ -1550,6 +1626,7 @@ def build_html(payload: dict[str, Any]) -> str:
       el.timeSlider.value = row.t;
       if (referenceTrack) {{
         const start = referenceTrack.samples[0];
+        const strategy = referenceTrack.meta.strategy;
         el.carMarker.style.display = "none";
         el.lapStartMarker.style.display = "";
         el.lapStartMarker.setAttribute("cx", xMap(start.x));
@@ -1557,8 +1634,16 @@ def build_html(payload: dict[str, Any]) -> str:
         drawStrategy(state.index);
         drawTrail(state.index);
         drawBoundaries();
-        el.mapReadout.textContent = `${{referenceTrack.label}} | geometry only | ${{referenceTrack.meta.length_m.toFixed(1)}} m | ${{referenceTrack.meta.sample_count}} points | strategy awaits recorded telemetry or a transferable vehicle model`;
-        el.metricLegend.style.display = "none";
+        if (strategy) {{
+          el.mapReadout.textContent = `${{referenceTrack.label}} | model-derived maximum-efficiency curve | ${{referenceTrack.meta.length_m.toFixed(1)}} m | predicted ${{strategy.predicted_lap_time_s.toFixed(1)}} s / ${{strategy.target_lap_time_s.toFixed(1)}} s limit | ${{strategy.predicted_energy_j.toFixed(0)}} J`;
+          el.legendMin.textContent = strategy.target_speed_min_kph.toFixed(1);
+          el.legendMax.textContent = strategy.target_speed_max_kph.toFixed(1);
+          el.legendTitle.textContent = "Modeled target speed (km/h)";
+          el.metricLegend.style.display = "grid";
+        }} else {{
+          el.mapReadout.textContent = `${{referenceTrack.label}} | geometry only | ${{referenceTrack.meta.length_m.toFixed(1)}} m | ${{referenceTrack.meta.sample_count}} points | no strategy supplied`;
+          el.metricLegend.style.display = "none";
+        }}
       }} else {{
         el.carMarker.style.display = "";
         el.lapStartMarker.style.display = "";
@@ -1577,11 +1662,20 @@ def build_html(payload: dict[str, Any]) -> str:
       if (!referenceTrack) {{
         el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  pulse=${{row.pulseDuration.toFixed(1)}}s coast=${{row.coastDuration.toFixed(1)}}s  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
       }}
-      el.lapValue.textContent = String(row.lap);
-      el.strategyValue.textContent = row.strategyAction;
-      el.targetSpeedValue.textContent = format(row.targetSpeed, 1, " km/h");
-      el.predCurrentValue.textContent = format(row.predCurrent, 0, " mA");
-      el.predPowerValue.textContent = format(row.predPower, 1, " W");
+      if (referenceTrack && referenceTrack.meta.strategy) {{
+        const strategy = referenceTrack.meta.strategy;
+        el.lapValue.textContent = "model";
+        el.strategyValue.textContent = "min energy";
+        el.targetSpeedValue.textContent = `${{strategy.target_speed_min_kph.toFixed(1)}}-${{strategy.target_speed_max_kph.toFixed(1)}} km/h`;
+        el.predCurrentValue.textContent = "-";
+        el.predPowerValue.textContent = "-";
+      }} else {{
+        el.lapValue.textContent = String(row.lap);
+        el.strategyValue.textContent = row.strategyAction;
+        el.targetSpeedValue.textContent = format(row.targetSpeed, 1, " km/h");
+        el.predCurrentValue.textContent = format(row.predCurrent, 0, " mA");
+        el.predPowerValue.textContent = format(row.predPower, 1, " W");
+      }}
       if (!referenceTrack) {{
         const domain = run.domains.metrics[state.metric];
         el.legendMin.textContent = domain[0].toFixed(1);
@@ -1589,7 +1683,9 @@ def build_html(payload: dict[str, Any]) -> str:
         el.legendTitle.textContent = `Trail color: ${{metric.label}} (${{metric.unit}})`;
         el.metricLegend.style.display = "grid";
       }}
-      const previewText = referenceTrack ? ` | map preview: ${{referenceTrack.label}} (geometry only)` : "";
+      const previewText = referenceTrack
+        ? ` | map preview: ${{referenceTrack.label}} (${{referenceTrack.meta.strategy ? "modeled efficiency strategy" : "geometry only"}})`
+        : "";
       el.metaText.textContent = `${{run.label}} | ${{run.meta.sample_count}} samples | ${{run.meta.duration_s.toFixed(1)}}s | energy delta ${{run.strategy.delta_energy_pct.toFixed(2)}}%${{previewText}}`;
     }}
 

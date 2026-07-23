@@ -24,6 +24,11 @@ from build_interactive_dashboard import (
     make_run_payload,
 )
 from preprocess_track import build_centerline, closed_length
+from generate_reference_strategy import (
+    build_reference_segments,
+    make_transferable_model,
+    periodic_curvature,
+)
 from utsm_telemetry.core import (
     add_xy,
     compute_distance,
@@ -156,7 +161,7 @@ class TestTrackPreprocessing(unittest.TestCase):
         self.assertAlmostEqual(np.max(centerline[:, 1]), 45.0, delta=2.0)
         self.assertAlmostEqual(closed_length(centerline), float(metrics["centerline_length_m"]), places=6)
 
-    def test_packaged_autodrome_is_geometry_only_reference_track(self):
+    def test_packaged_autodrome_includes_model_strategy(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         specs = discover_reference_tracks(os.path.join(root, "data", "tracks"))
         autodrome = next(spec for spec in specs if spec["id"] == "autodrome-chaudiere")
@@ -164,6 +169,39 @@ class TestTrackPreprocessing(unittest.TestCase):
         self.assertTrue(payload["meta"]["geometry_only"])
         self.assertEqual(payload["meta"]["sample_count"], 81)
         self.assertAlmostEqual(payload["meta"]["length_m"], 399.3, delta=1.0)
+        self.assertTrue(payload["meta"]["strategy"]["model_derived"])
+        self.assertLessEqual(
+            payload["meta"]["strategy"]["predicted_lap_time_s"],
+            payload["meta"]["strategy"]["target_lap_time_s"],
+        )
+        self.assertTrue(all("targetSpeed" in sample for sample in payload["samples"]))
+
+    def test_reference_curvature_and_segmentation_are_closed_loop(self):
+        angles = np.linspace(0.0, 2.0 * math.pi, 80, endpoint=False)
+        xy = np.column_stack((40.0 * np.cos(angles), 40.0 * np.sin(angles)))
+        curvature = periodic_curvature(xy)
+        geometry = pd.DataFrame({
+            "x": xy[:, 0],
+            "y": xy[:, 1],
+            "run_cumdist_m": np.arange(80) * (2.0 * math.pi * 40.0 / 80),
+            "curvature_1_m": curvature,
+        })
+        geometry.attrs["track_length_m"] = 2.0 * math.pi * 40.0
+        segments = build_reference_segments(geometry, strategy_step_m=20.0, nominal_speed_kph=20.0)
+        self.assertAlmostEqual(float(np.median(curvature)), 1.0 / 40.0, delta=0.002)
+        self.assertEqual(len(segments), math.ceil(geometry.attrs["track_length_m"] / 20.0))
+        self.assertAlmostEqual(float(segments["length_m"].sum()), geometry.attrs["track_length_m"])
+
+    def test_transfer_model_neutralizes_source_position(self):
+        model = {
+            "current_coeffs": np.arange(9, dtype=float),
+            "power_coeffs": np.arange(9, dtype=float) * 2.0,
+        }
+        transferred = make_transferable_model(model)
+        self.assertEqual(float(transferred["current_coeffs"][7]), 0.0)
+        self.assertEqual(float(transferred["power_coeffs"][7]), 0.0)
+        self.assertEqual(float(transferred["current_coeffs"][0]), 3.5)
+        self.assertTrue(transferred["transfer_position_neutralized"])
 
 
 class TestComputeDistance(unittest.TestCase):
@@ -523,6 +561,22 @@ class TestSimulation(unittest.TestCase):
         self.assertTrue((profile.loc[profile["action"] != "coast", "pulse_duration_s"] >= 0.0).all())
         self.assertTrue(np.isfinite(profile["pred_energy_j"].sum()))
         self.assertGreater(profile["pred_energy_j"].iloc[0], 0.0)
+
+        closed_profile = optimize_speed_profile(
+            segments,
+            model,
+            time_budget_sec=float(segments["baseline_time_s"].sum() * 1.2),
+            speed_min_kph=10.0,
+            speed_max_kph=30.0,
+            max_delta_kph_per_segment=4.0,
+            speed_step_kph=2.0,
+            fuse_current_ma=20000.0,
+            fuse_max_duration_sec=1.0,
+            start_speed_kph=18.0,
+            end_speed_kph=18.0,
+            end_speed_tolerance_kph=0.01,
+        )
+        self.assertAlmostEqual(float(closed_profile["target_speed_kph"].iloc[-1]), 18.0)
 
     def test_coast_strategy_predicts_zero_propulsion_current(self):
         rows = []
