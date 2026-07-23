@@ -281,6 +281,7 @@ def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
     stem = centerline_path.name.removesuffix("-centerline.gpx")
     strategy_path = centerline_path.with_name(f"{stem}-efficiency-strategy.csv")
     segments_path = centerline_path.with_name(f"{stem}-strategy-segments.csv")
+    report_path = centerline_path.with_name(f"{stem}-strategy-report.txt")
     if strategy_path.is_file() and segments_path.is_file():
         strategy_points = pd.read_csv(strategy_path)
         strategy_segments = pd.read_csv(segments_path)
@@ -298,6 +299,8 @@ def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
                 "strategyAction": str(row.action),
                 "predCurrent": finite_float(row.pred_current_mA, 0),
                 "predPower": finite_float(row.pred_power_w, 2),
+                "segment": int(row.segment),
+                "distance": finite_float(row.distance_m, 2),
             }
             for row in strategy_points.itertuples(index=False)
         ]
@@ -317,14 +320,72 @@ def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
         ).dropna()
         if time_budget.empty:
             raise ValueError(f"Reference strategy '{segments_path}' has no time budget.")
+        predicted_time = float(
+            pd.to_numeric(strategy_segments["segment_time_s"], errors="coerce").sum()
+        )
+        predicted_energy = float(
+            pd.to_numeric(strategy_segments["pred_energy_j"], errors="coerce").sum()
+        )
+        action = strategy_segments["action"].astype(str)
+        coast_mask = action.eq("coast")
+        over_flags = strategy_segments["over_fuse_limit"].astype(bool).tolist()
+        over_durations = pd.to_numeric(
+            strategy_segments["fuse_over_duration_s"], errors="coerce"
+        ).fillna(0.0).tolist()
         strategy_meta.update({
             "target_lap_time_s": finite_float(time_budget.iloc[0], 1),
-            "predicted_lap_time_s": finite_float(
-                pd.to_numeric(strategy_segments["segment_time_s"], errors="coerce").sum(), 1
+            "predicted_lap_time_s": finite_float(predicted_time, 1),
+            "predicted_energy_j": finite_float(predicted_energy, 1),
+            "energy_intensity_j_km": finite_float(predicted_energy / (length_m / 1000.0), 1),
+            "peak_current_mA": finite_float(
+                pd.to_numeric(strategy_segments["pred_peak_current_mA"], errors="coerce").max(), 0
             ),
-            "predicted_energy_j": finite_float(
-                pd.to_numeric(strategy_segments["pred_energy_j"], errors="coerce").sum(), 1
+            "peak_power_w": finite_float(
+                pd.to_numeric(strategy_segments["pred_power_w"], errors="coerce").max(), 1
             ),
+            "total_over_fuse_s": finite_float(sum(over_durations), 2),
+            "longest_over_fuse_s": finite_float(
+                longest_true_duration(over_flags, over_durations), 2
+            ),
+            "coast_time_s": finite_float(
+                pd.to_numeric(
+                    strategy_segments.loc[coast_mask, "segment_time_s"], errors="coerce"
+                ).sum(),
+                1,
+            ),
+            "coast_distance_m": finite_float(
+                pd.to_numeric(
+                    strategy_segments.loc[coast_mask, "length_m"], errors="coerce"
+                ).sum(),
+                1,
+            ),
+            "segment_count": int(len(strategy_segments)),
+            "accelerate_count": int(action.eq("accelerate").sum()),
+            "hold_count": int(action.eq("hold").sum()),
+            "coast_count": int(coast_mask.sum()),
+            "time_error_pct": finite_float(
+                (predicted_time - float(time_budget.iloc[0])) / float(time_budget.iloc[0]) * 100.0,
+                2,
+            ),
+            "report": (
+                report_path.read_text(encoding="utf-8")
+                if report_path.is_file()
+                else "Model-derived reference strategy."
+            ),
+            "segments": [
+                {
+                    "segment": int(row.segment),
+                    "start": finite_float(row.dist_start_m, 1),
+                    "end": finite_float(row.dist_end_m, 1),
+                    "action": str(row.action),
+                    "speed": finite_float(row.target_speed_kph, 1),
+                    "current": finite_float(row.pred_current_mA, 0),
+                    "power": finite_float(row.pred_power_w, 1),
+                    "time": finite_float(row.segment_time_s, 2),
+                    "energy": finite_float(row.pred_energy_j, 1),
+                }
+                for row in strategy_segments.itertuples(index=False)
+            ],
         })
     return {
         "id": spec["id"],
@@ -1101,6 +1162,43 @@ def build_html(payload: dict[str, Any]) -> str:
       grid-template-rows: repeat(6, 118px);
       gap: 10px;
     }}
+    .reference-strategy {{ display: none; }}
+    .reference-note {{
+      margin: 0 0 10px;
+      padding: 10px;
+      border: 1px solid #f59e0b;
+      border-radius: 6px;
+      background: #fffbeb;
+      color: #78350f;
+      font-size: 12px;
+      line-height: 1.4;
+    }}
+    .reference-chart {{
+      width: 100%;
+      border: 1px solid #d9dee6;
+      margin-bottom: 10px;
+    }}
+    .strategy-table-wrap {{ max-height: 410px; overflow: auto; border: 1px solid #d9dee6; }}
+    .strategy-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .strategy-table th, .strategy-table td {{
+      padding: 6px 7px;
+      border-bottom: 1px solid #e5e9ef;
+      text-align: right;
+      white-space: nowrap;
+    }}
+    .strategy-table th {{ position: sticky; top: 0; background: #f8fafc; color: #475569; }}
+    .strategy-table th:nth-child(2), .strategy-table td:nth-child(2) {{ text-align: left; }}
+    .action-badge {{
+      display: inline-block;
+      min-width: 72px;
+      padding: 3px 6px;
+      border-radius: 999px;
+      color: #fff;
+      text-align: center;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: .03em;
+    }}
     .chart {{ border: 1px solid #d9dee6; }}
     .strategy-summary {{
       display: grid;
@@ -1207,19 +1305,29 @@ def build_html(payload: dict[str, Any]) -> str:
       </div>
       <div class="panel">
         <div class="strategy-summary">
-          <div class="summary-card"><span>Energy delta</span><strong id="energyDeltaValue"></strong></div>
-          <div class="summary-card"><span>Pred time</span><strong id="predTimeValue"></strong></div>
-          <div class="summary-card"><span>Time > 20A</span><strong id="overFuseValue"></strong></div>
-          <div class="summary-card"><span>Longest burst</span><strong id="longestFuseValue"></strong></div>
-          <div class="summary-card"><span>Pred peak current</span><strong id="peakCurrentValue"></strong></div>
-          <div class="summary-card"><span>Coast time</span><strong id="coastTimeValue"></strong></div>
-          <div class="summary-card"><span>Coast distance</span><strong id="coastDistanceValue"></strong></div>
-          <div class="summary-card"><span>Pulse segments</span><strong id="pulseCountValue"></strong></div>
-          <div class="summary-card"><span>Time error</span><strong id="timeErrorValue"></strong></div>
-          <div class="summary-card"><span>Gear estimate</span><strong id="gearValue"></strong></div>
+          <div class="summary-card"><span id="energyDeltaLabel">Energy delta</span><strong id="energyDeltaValue"></strong></div>
+          <div class="summary-card"><span id="predTimeLabel">Pred time</span><strong id="predTimeValue"></strong></div>
+          <div class="summary-card"><span id="overFuseLabel">Time &gt; 20A</span><strong id="overFuseValue"></strong></div>
+          <div class="summary-card"><span id="longestFuseLabel">Longest burst</span><strong id="longestFuseValue"></strong></div>
+          <div class="summary-card"><span id="peakCurrentLabel">Pred peak current</span><strong id="peakCurrentValue"></strong></div>
+          <div class="summary-card"><span id="coastTimeLabel">Coast time</span><strong id="coastTimeValue"></strong></div>
+          <div class="summary-card"><span id="coastDistanceLabel">Coast distance</span><strong id="coastDistanceValue"></strong></div>
+          <div class="summary-card"><span id="pulseCountLabel">Pulse segments</span><strong id="pulseCountValue"></strong></div>
+          <div class="summary-card"><span id="timeErrorLabel">Time error</span><strong id="timeErrorValue"></strong></div>
+          <div class="summary-card"><span id="gearLabel">Gear estimate</span><strong id="gearValue"></strong></div>
         </div>
         <div class="charts" id="charts"></div>
         <div class="legend-stack" id="chartLegend"></div>
+        <div class="reference-strategy" id="referenceStrategy">
+          <p class="reference-note">Transferred-model preview. These are predicted targets, not measured Autodrome telemetry.</p>
+          <div id="referenceSpeedChart"></div>
+          <div class="strategy-table-wrap">
+            <table class="strategy-table">
+              <thead><tr><th>#</th><th>Action</th><th>Distance</th><th>Target</th><th>Current</th><th>Power</th><th>Energy</th></tr></thead>
+              <tbody id="referenceStrategyRows"></tbody>
+            </table>
+          </div>
+        </div>
         <details>
           <summary>Strategy report</summary>
           <pre id="reportText"></pre>
@@ -1276,17 +1384,30 @@ def build_html(payload: dict[str, Any]) -> str:
       predCurrentValue: document.getElementById("predCurrentValue"),
       predPowerValue: document.getElementById("predPowerValue"),
       energyDeltaValue: document.getElementById("energyDeltaValue"),
+      energyDeltaLabel: document.getElementById("energyDeltaLabel"),
       predTimeValue: document.getElementById("predTimeValue"),
+      predTimeLabel: document.getElementById("predTimeLabel"),
       overFuseValue: document.getElementById("overFuseValue"),
+      overFuseLabel: document.getElementById("overFuseLabel"),
       longestFuseValue: document.getElementById("longestFuseValue"),
+      longestFuseLabel: document.getElementById("longestFuseLabel"),
       peakCurrentValue: document.getElementById("peakCurrentValue"),
+      peakCurrentLabel: document.getElementById("peakCurrentLabel"),
       coastTimeValue: document.getElementById("coastTimeValue"),
+      coastTimeLabel: document.getElementById("coastTimeLabel"),
       coastDistanceValue: document.getElementById("coastDistanceValue"),
+      coastDistanceLabel: document.getElementById("coastDistanceLabel"),
       pulseCountValue: document.getElementById("pulseCountValue"),
+      pulseCountLabel: document.getElementById("pulseCountLabel"),
       timeErrorValue: document.getElementById("timeErrorValue"),
+      timeErrorLabel: document.getElementById("timeErrorLabel"),
       gearValue: document.getElementById("gearValue"),
+      gearLabel: document.getElementById("gearLabel"),
       reportText: document.getElementById("reportText"),
       chartLegend: document.getElementById("chartLegend"),
+      referenceStrategy: document.getElementById("referenceStrategy"),
+      referenceSpeedChart: document.getElementById("referenceSpeedChart"),
+      referenceStrategyRows: document.getElementById("referenceStrategyRows"),
       strategyLegend: document.getElementById("strategyLegend"),
       metricLegend: document.getElementById("metricLegend"),
       legendTitle: document.getElementById("legendTitle"),
@@ -1438,13 +1559,39 @@ def build_html(payload: dict[str, Any]) -> str:
         }}
         const rows = referenceTrack.samples;
         let markup = "";
+        const actionMode = el.colorMode.value === "action";
         for (let i = 1; i < rows.length; i++) {{
           const a = rows[i - 1];
           const b = rows[i];
-          const color = colorForDomain(b.targetSpeed, referenceTrack.domains.targetSpeed);
-          markup += `<line x1="${{xMap(a.x).toFixed(1)}}" y1="${{yMap(a.y).toFixed(1)}}" x2="${{xMap(b.x).toFixed(1)}}" y2="${{yMap(b.y).toFixed(1)}}" stroke="${{color}}" stroke-width="8" stroke-linecap="round" opacity="0.96"/>`;
+          const color = actionMode
+            ? (ACTION_COLORS[b.strategyAction] || "#64748b")
+            : colorForDomain(b.targetSpeed, referenceTrack.domains.targetSpeed);
+          markup += `<line x1="${{xMap(a.x).toFixed(1)}}" y1="${{yMap(a.y).toFixed(1)}}" x2="${{xMap(b.x).toFixed(1)}}" y2="${{yMap(b.y).toFixed(1)}}" stroke="${{color}}" stroke-width="${{actionMode ? 10 : 8}}" stroke-linecap="round" opacity="0.96"/>`;
         }}
         el.strategyLayer.innerHTML = markup;
+        if (!actionMode || !el.showLabels.checked) return;
+        const groups = [];
+        for (const segment of referenceTrack.meta.strategy.segments) {{
+          const previous = groups[groups.length - 1];
+          if (previous && previous.action === segment.action) {{
+            previous.end = segment.end;
+          }} else {{
+            groups.push({{action: segment.action, start: segment.start, end: segment.end}});
+          }}
+        }}
+        el.labelLayer.innerHTML = groups.map(group => {{
+          const midpoint = (group.start + group.end) / 2;
+          const point = rows.reduce(
+            (best, candidate) => Math.abs(candidate.distance - midpoint) < Math.abs(best.distance - midpoint) ? candidate : best,
+            rows[0]
+          );
+          const color = ACTION_COLORS[group.action] || "#64748b";
+          const text = group.action === "accelerate" ? "ACCEL" : group.action.toUpperCase();
+          const width = text.length * 7 + 16;
+          const x = xMap(point.x);
+          const y = yMap(point.y);
+          return `<g><rect x="${{x - width / 2}}" y="${{y - 11}}" width="${{width}}" height="22" rx="11" fill="rgba(255,255,255,0.96)" stroke="${{color}}" stroke-width="2"/><text x="${{x}}" y="${{y + 4}}" text-anchor="middle" style="fill:${{color}};font-size:10px;font-weight:800">${{text}}</text></g>`;
+        }}).join("");
         return;
       }}
       const samples = runSamples();
@@ -1600,7 +1747,97 @@ def build_html(payload: dict[str, Any]) -> str:
       }});
     }}
 
+    function setSummaryLabels(labels) {{
+      el.energyDeltaLabel.textContent = labels[0];
+      el.predTimeLabel.textContent = labels[1];
+      el.overFuseLabel.textContent = labels[2];
+      el.longestFuseLabel.textContent = labels[3];
+      el.peakCurrentLabel.textContent = labels[4];
+      el.coastTimeLabel.textContent = labels[5];
+      el.coastDistanceLabel.textContent = labels[6];
+      el.pulseCountLabel.textContent = labels[7];
+      el.timeErrorLabel.textContent = labels[8];
+      el.gearLabel.textContent = labels[9];
+    }}
+
+    function renderReferenceStrategy(strategy, trackLength) {{
+      const width = 620;
+      const height = 190;
+      const pad = {{left: 48, right: 14, top: 24, bottom: 32}};
+      const minSpeed = Math.floor(strategy.target_speed_min_kph - 1);
+      const maxSpeed = Math.ceil(strategy.target_speed_max_kph + 1);
+      const sx = distance => pad.left + distance / trackLength * (width - pad.left - pad.right);
+      const sy = speed => height - pad.bottom - (speed - minSpeed) / (maxSpeed - minSpeed) * (height - pad.top - pad.bottom);
+      const backgrounds = strategy.segments.map(segment =>
+        `<rect x="${{sx(segment.start).toFixed(1)}}" y="${{pad.top}}" width="${{Math.max(1, sx(segment.end) - sx(segment.start)).toFixed(1)}}" height="${{height - pad.top - pad.bottom}}" fill="${{ACTION_COLORS[segment.action] || "#64748b"}}" opacity="0.12"/>`
+      ).join("");
+      let path = "";
+      strategy.segments.forEach((segment, index) => {{
+        const x0 = sx(segment.start);
+        const x1 = sx(segment.end);
+        const y = sy(segment.speed);
+        path += index === 0 ? `M${{x0.toFixed(1)}} ${{y.toFixed(1)}}` : `V${{y.toFixed(1)}}`;
+        path += `H${{x1.toFixed(1)}}`;
+      }});
+      const yTicks = [minSpeed, Math.round((minSpeed + maxSpeed) / 2), maxSpeed].map(value =>
+        `<g><line x1="${{pad.left}}" x2="${{width-pad.right}}" y1="${{sy(value)}}" y2="${{sy(value)}}" stroke="#e2e8f0"/><text x="${{pad.left-7}}" y="${{sy(value)+4}}" text-anchor="end" class="tick-label">${{value}}</text></g>`
+      ).join("");
+      el.referenceSpeedChart.innerHTML = `
+        <svg class="reference-chart" viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="Autodrome modeled target speed by distance">
+          <text x="${{pad.left}}" y="16" class="axis-label">Target speed by distance — backgrounds show ACCELERATE / HOLD / COAST</text>
+          ${{backgrounds}}${{yTicks}}
+          <path d="${{path}}" fill="none" stroke="#2563eb" stroke-width="3"/>
+          <text x="${{width/2}}" y="${{height-7}}" text-anchor="middle" class="axis-label">Lap distance (m)</text>
+          <text x="13" y="${{height/2}}" transform="rotate(-90 13 ${{height/2}})" text-anchor="middle" class="axis-label">km/h</text>
+        </svg>`;
+      el.referenceStrategyRows.innerHTML = strategy.segments.map(segment => {{
+        const color = ACTION_COLORS[segment.action] || "#64748b";
+        return `<tr>
+          <td>${{segment.segment}}</td>
+          <td><span class="action-badge" style="background:${{color}}">${{segment.action.toUpperCase()}}</span></td>
+          <td>${{segment.start.toFixed(0)}}–${{segment.end.toFixed(0)}} m</td>
+          <td>${{segment.speed.toFixed(1)}} km/h</td>
+          <td>${{(segment.current/1000).toFixed(1)}} A</td>
+          <td>${{segment.power.toFixed(1)}} W</td>
+          <td>${{segment.energy.toFixed(0)}} J</td>
+        </tr>`;
+      }}).join("");
+    }}
+
     function updateSummary() {{
+      const referenceTrack = getReferenceTrack();
+      const referenceStrategy = referenceTrack?.meta.strategy;
+      if (referenceStrategy) {{
+        setSummaryLabels([
+          "Pred energy", "Pred lap time", "Lap-time limit", "Track length",
+          "Pred peak current", "Coast time", "Coast distance", "A / H / C segments",
+          "Time margin", "Model status"
+        ]);
+        el.energyDeltaValue.textContent = `${{(referenceStrategy.predicted_energy_j / 1000).toFixed(2)}} kJ`;
+        el.predTimeValue.textContent = `${{referenceStrategy.predicted_lap_time_s.toFixed(1)}} s`;
+        el.overFuseValue.textContent = `${{referenceStrategy.target_lap_time_s.toFixed(1)}} s`;
+        el.longestFuseValue.textContent = `${{referenceTrack.meta.length_m.toFixed(1)}} m`;
+        el.peakCurrentValue.textContent = `${{(referenceStrategy.peak_current_mA / 1000).toFixed(1)}} A`;
+        el.coastTimeValue.textContent = `${{referenceStrategy.coast_time_s.toFixed(1)}} s`;
+        el.coastDistanceValue.textContent = `${{referenceStrategy.coast_distance_m.toFixed(0)}} m`;
+        el.pulseCountValue.textContent = `${{referenceStrategy.accelerate_count}} / ${{referenceStrategy.hold_count}} / ${{referenceStrategy.coast_count}}`;
+        el.timeErrorValue.textContent = `${{(referenceStrategy.target_lap_time_s - referenceStrategy.predicted_lap_time_s).toFixed(1)}} s`;
+        el.gearValue.textContent = "Transferred";
+        el.reportText.textContent = referenceStrategy.report;
+        el.charts.style.display = "none";
+        el.chartLegend.style.display = "none";
+        el.referenceStrategy.style.display = "block";
+        renderReferenceStrategy(referenceStrategy, referenceTrack.meta.length_m);
+        return;
+      }}
+      setSummaryLabels([
+        "Energy delta", "Pred time", "Time > 20A", "Longest burst",
+        "Pred peak current", "Coast time", "Coast distance", "Pulse segments",
+        "Time error", "Gear estimate"
+      ]);
+      el.charts.style.display = "grid";
+      el.chartLegend.style.display = "grid";
+      el.referenceStrategy.style.display = "none";
       const strategy = getRun().strategy;
       el.energyDeltaValue.textContent = `${{strategy.delta_energy_pct.toFixed(2)}}%`;
       el.predTimeValue.textContent = `${{strategy.predicted_time_s.toFixed(1)}} s`;
@@ -1635,11 +1872,14 @@ def build_html(payload: dict[str, Any]) -> str:
         drawTrail(state.index);
         drawBoundaries();
         if (strategy) {{
-          el.mapReadout.textContent = `${{referenceTrack.label}} | model-derived maximum-efficiency curve | ${{referenceTrack.meta.length_m.toFixed(1)}} m | predicted ${{strategy.predicted_lap_time_s.toFixed(1)}} s / ${{strategy.target_lap_time_s.toFixed(1)}} s limit | ${{strategy.predicted_energy_j.toFixed(0)}} J`;
+          const modeText = el.colorMode.value === "action"
+            ? "action regions: orange ACCELERATE, blue HOLD, green COAST"
+            : "target-speed gradient: purple slower, yellow faster";
+          el.mapReadout.textContent = `${{referenceTrack.label}} | ${{modeText}} | ${{referenceTrack.meta.length_m.toFixed(1)}} m | predicted ${{strategy.predicted_lap_time_s.toFixed(1)}} s / ${{strategy.target_lap_time_s.toFixed(1)}} s limit | ${{strategy.predicted_energy_j.toFixed(0)}} J`;
           el.legendMin.textContent = strategy.target_speed_min_kph.toFixed(1);
           el.legendMax.textContent = strategy.target_speed_max_kph.toFixed(1);
           el.legendTitle.textContent = "Modeled target speed (km/h)";
-          el.metricLegend.style.display = "grid";
+          el.metricLegend.style.display = el.colorMode.value === "metric" ? "grid" : "none";
         }} else {{
           el.mapReadout.textContent = `${{referenceTrack.label}} | geometry only | ${{referenceTrack.meta.length_m.toFixed(1)}} m | ${{referenceTrack.meta.sample_count}} points | no strategy supplied`;
           el.metricLegend.style.display = "none";
@@ -1656,7 +1896,11 @@ def build_html(payload: dict[str, Any]) -> str:
         drawBoundaries();
       }}
       updateCharts(state.index);
-      el.timeText.textContent = `t=${{row.t.toFixed(1)}}s / ${{run.meta.duration_s.toFixed(1)}}s`;
+      el.timeText.textContent = referenceTrack
+        ? "Reference strategy (no recorded lap playback)"
+        : `t=${{row.t.toFixed(1)}}s / ${{run.meta.duration_s.toFixed(1)}}s`;
+      el.timeSlider.disabled = Boolean(referenceTrack);
+      el.playButton.disabled = Boolean(referenceTrack);
       const metric = metricSpecs[state.metric];
       const metricValue = row[metric.field];
       if (!referenceTrack) {{
@@ -1665,10 +1909,10 @@ def build_html(payload: dict[str, Any]) -> str:
       if (referenceTrack && referenceTrack.meta.strategy) {{
         const strategy = referenceTrack.meta.strategy;
         el.lapValue.textContent = "model";
-        el.strategyValue.textContent = "min energy";
+        el.strategyValue.textContent = `${{strategy.accelerate_count}}A / ${{strategy.hold_count}}H / ${{strategy.coast_count}}C`;
         el.targetSpeedValue.textContent = `${{strategy.target_speed_min_kph.toFixed(1)}}-${{strategy.target_speed_max_kph.toFixed(1)}} km/h`;
-        el.predCurrentValue.textContent = "-";
-        el.predPowerValue.textContent = "-";
+        el.predCurrentValue.textContent = `${{(strategy.peak_current_mA / 1000).toFixed(1)}} A peak`;
+        el.predPowerValue.textContent = `${{strategy.peak_power_w.toFixed(1)}} W peak`;
       }} else {{
         el.lapValue.textContent = String(row.lap);
         el.strategyValue.textContent = row.strategyAction;
@@ -1738,6 +1982,7 @@ def build_html(payload: dict[str, Any]) -> str:
     function switchMap(trackId) {{
       state.trackId = trackId;
       drawFullTrack();
+      updateSummary();
       update(state.index);
     }}
 

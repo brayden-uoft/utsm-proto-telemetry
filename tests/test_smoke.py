@@ -174,6 +174,14 @@ class TestTrackPreprocessing(unittest.TestCase):
             payload["meta"]["strategy"]["predicted_lap_time_s"],
             payload["meta"]["strategy"]["target_lap_time_s"],
         )
+        self.assertEqual(payload["meta"]["strategy"]["segment_count"], 20)
+        self.assertEqual(
+            payload["meta"]["strategy"]["accelerate_count"]
+            + payload["meta"]["strategy"]["hold_count"]
+            + payload["meta"]["strategy"]["coast_count"],
+            20,
+        )
+        self.assertIn("Autodrome Chaudiere Transfer Strategy", payload["meta"]["strategy"]["report"])
         self.assertTrue(all("targetSpeed" in sample for sample in payload["samples"]))
 
     def test_reference_curvature_and_segmentation_are_closed_loop(self):
@@ -817,6 +825,8 @@ class TestSimulation(unittest.TestCase):
         html = build_html(payload)
         self.assertNotIn(' : "#111827"', html)
         self.assertIn("Trail color:", html)
+        self.assertIn("referenceStrategyRows", html)
+        self.assertIn("ACCELERATE / HOLD / COAST", html)
 
     def test_current_penalty_pushes_down_fuse_risk(self):
         rows = []
