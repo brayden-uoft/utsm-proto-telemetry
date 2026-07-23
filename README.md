@@ -248,6 +248,21 @@ The dashboard generator runs the same optimizer internally so the HTML stays in 
 
 The current optimizer is empirical and deterministic. It fits current and power models from historical samples, simulates explicit `accelerate` / pulse-and-coast `hold` / zero-throttle `coast` behavior by short equal-distance segment, minimizes predicted joules near the recorded 3-lap pace, and rejects strategies that stay above the fuse current threshold for too long. `--segments` is still accepted as a legacy fixed-count override, but `--strategy-step-m 50` is the default path because the driver can change accel/hold/coast state within `100 m`.
 
+## Firmware Strategy Export
+
+Export the dashboard strategy into a live-GPS lookup table for the telemetry firmware:
+
+```powershell
+python export_firmware_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\afternoon-run\telemetry_20260411_122713.csv --name strategy_indy --laps 3 --strategy-step-m 50 --export-spacing-m 10 --output-prefix data\strategy\indy
+```
+
+This writes:
+
+- `data\strategy\indy_strategy_map.csv` for review/debugging
+- `data\strategy\indy_strategy_map.h` for Arduino/ESP32 firmware
+
+Firmware should treat the strategy as a lookup table: optimize in Python, then map live GPS latitude/longitude to the nearest exported track point and read the target speed/action from that point. The lookup allows GPS points to be offset from the exact racing line using the exported off-track radius.
+
 ## Optional Animation Fallback
 
 The interactive dashboard is the main visualization. The older animation scripts are kept as optional fallback/demo tools:
