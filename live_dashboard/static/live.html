@@ -17,7 +17,7 @@
     .dot { width:10px; height:10px; border-radius:50%; background:var(--red); box-shadow:0 0 12px currentColor; }
     .dot.online { background:var(--green); }
     main { padding:18px; max-width:1700px; margin:auto; }
-    .gauges { display:grid; grid-template-columns:repeat(4,minmax(160px,1fr)); gap:12px; }
+    .gauges { display:grid; grid-template-columns:repeat(5,minmax(150px,1fr)); gap:12px; }
     .gauge,.panel { background:linear-gradient(145deg,#122137,#0d1828); border:1px solid var(--line); border-radius:12px; }
     .gauge { padding:14px; }
     .gauge-label { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.1em; }
@@ -54,6 +54,7 @@
       <div class="gauge"><div class="gauge-label">Current</div><div class="gauge-value"><span id="currentValue">—</span> A</div><div class="bar"><span id="currentBar"></span></div></div>
       <div class="gauge"><div class="gauge-label">Voltage</div><div class="gauge-value"><span id="voltageValue">—</span> V</div><div class="bar"><span id="voltageBar"></span></div></div>
       <div class="gauge"><div class="gauge-label">Power</div><div class="gauge-value"><span id="powerValue">—</span> W</div><div class="bar"><span id="powerBar"></span></div></div>
+      <div class="gauge"><div class="gauge-label">Beam-break speed</div><div class="gauge-value"><span id="speedValue">—</span> km/h</div><div class="bar"><span id="speedBar"></span></div></div>
       <div class="gauge"><div class="gauge-label">Acceleration magnitude</div><div class="gauge-value"><span id="accelValue">—</span> m/s²</div><div class="bar"><span id="accelBar"></span></div></div>
     </section>
     <section class="grid">
@@ -61,12 +62,13 @@
         <div class="chart-wrap"><div class="chart-title">Current (A)</div><canvas id="currentChart"></canvas></div>
         <div class="chart-wrap"><div class="chart-title">Voltage (V)</div><canvas id="voltageChart"></canvas></div>
         <div class="chart-wrap"><div class="chart-title">Power (W)</div><canvas id="powerChart"></canvas></div>
+        <div class="chart-wrap"><div class="chart-title">Beam-break speed (km/h)</div><canvas id="speedChart"></canvas></div>
         <div class="chart-wrap"><div class="chart-title">Acceleration magnitude (m/s²)</div><canvas id="accelChart"></canvas></div>
       </div></div>
       <div class="panel" style="position:relative"><h2>Live position</h2><div id="mapWait" class="map-wait">Waiting for GPS fields from firmware</div><div id="map"></div></div>
     </section>
     <section class="panel table-panel"><h2>Live CSV rows</h2><div class="table-scroll"><table><thead><tr>
-      <th>Received</th><th>Seq</th><th>timestamp_ms</th><th>current_mA</th><th>voltage_mV</th><th>ax_x100</th><th>ay_x100</th><th>az_x100</th><th>amag_x100</th><th>Latitude</th><th>Longitude</th>
+      <th>Received</th><th>Seq</th><th>timestamp_ms</th><th>wheel_speed_kph</th><th>current_mA</th><th>voltage_mV</th><th>ax_x100</th><th>ay_x100</th><th>az_x100</th><th>amag_x100</th><th>Latitude</th><th>Longitude</th>
     </tr></thead><tbody id="rows"></tbody></table></div></section>
   </main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -75,7 +77,7 @@
     const map=L.map('map').setView([39.79917,-86.23801],15);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
     function fmt(value,digits=2){return Number.isFinite(value)?value.toFixed(digits):'—'}
-    function setGauge(id,value,max){document.getElementById(id+'Value').textContent=fmt(value); document.getElementById(id+'Bar').style.width=Math.min(100,Math.max(0,Math.abs(value)/max*100))+'%'}
+    function setGauge(id,value,max){const valid=Number.isFinite(value);document.getElementById(id+'Value').textContent=fmt(value);document.getElementById(id+'Bar').style.width=(valid?Math.min(100,Math.max(0,Math.abs(value)/max*100)):0)+'%'}
     function drawChart(id,values,color){
       const c=document.getElementById(id), dpr=devicePixelRatio||1, w=c.clientWidth, h=c.clientHeight; c.width=w*dpr;c.height=h*dpr;
       const x=c.getContext('2d');x.scale(dpr,dpr);x.clearRect(0,0,w,h);x.strokeStyle='#213650';x.lineWidth=1;
@@ -84,11 +86,11 @@
       x.strokeStyle=color;x.lineWidth=2;x.beginPath();values.forEach((v,i)=>{const px=i/(maxSamples-1)*w,py=h-8-(v-lo)/(hi-lo)*(h-16);i?x.lineTo(px,py):x.moveTo(px,py)});x.stroke();
       x.fillStyle='#8fa4bf';x.font='10px system-ui';x.fillText(hi.toFixed(1),4,11);x.fillText(lo.toFixed(1),4,h-3);
     }
-    function redraw(){drawChart('currentChart',samples.map(r=>r.current_mA/1000),'#ff6174');drawChart('voltageChart',samples.map(r=>r.voltage_mV/1000),'#32a7ff');drawChart('powerChart',samples.map(r=>r.power_W),'#ffad42');drawChart('accelChart',samples.map(r=>r.acceleration_mps2),'#44d19d')}
-    function addRow(r){const tr=document.createElement('tr');const gps=v=>v==null?'—':Number(v).toFixed(7);tr.innerHTML=`<td>${new Date(r.received_at).toLocaleTimeString()}</td><td>${r.sequence}</td><td>${r.timestamp_ms}</td><td>${r.current_mA}</td><td>${r.voltage_mV}</td><td>${r.ax_x100}</td><td>${r.ay_x100}</td><td>${r.az_x100}</td><td>${r.amag_x100}</td><td>${gps(r.latitude)}</td><td>${gps(r.longitude)}</td>`;const body=document.getElementById('rows');body.prepend(tr);while(body.children.length>100)body.lastChild.remove()}
+    function redraw(){drawChart('currentChart',samples.map(r=>r.current_mA/1000),'#ff6174');drawChart('voltageChart',samples.map(r=>r.voltage_mV/1000),'#32a7ff');drawChart('powerChart',samples.map(r=>r.power_W),'#ffad42');drawChart('speedChart',samples.filter(r=>r.wheel_speed_valid&&Number.isFinite(r.wheel_speed_kph)).map(r=>r.wheel_speed_kph),'#b98cff');drawChart('accelChart',samples.map(r=>r.acceleration_mps2),'#44d19d')}
+    function addRow(r){const tr=document.createElement('tr');const gps=v=>v==null?'—':Number(v).toFixed(7),speed=r.wheel_speed_valid&&Number.isFinite(r.wheel_speed_kph)?Number(r.wheel_speed_kph).toFixed(2):'—';tr.innerHTML=`<td>${new Date(r.received_at).toLocaleTimeString()}</td><td>${r.sequence}</td><td>${r.timestamp_ms}</td><td>${speed}</td><td>${r.current_mA}</td><td>${r.voltage_mV}</td><td>${r.ax_x100}</td><td>${r.ay_x100}</td><td>${r.az_x100}</td><td>${r.amag_x100}</td><td>${gps(r.latitude)}</td><td>${gps(r.longitude)}</td>`;const body=document.getElementById('rows');body.prepend(tr);while(body.children.length>100)body.lastChild.remove()}
     function accept(r,history=false){
       samples.push(r);while(samples.length>maxSamples)samples.shift();lastRecordAt=Date.now();
-      setGauge('current',r.current_mA/1000,20);setGauge('voltage',r.voltage_mV/1000,30);setGauge('power',r.power_W,600);setGauge('accel',r.acceleration_mps2,20);addRow(r);
+      setGauge('current',r.current_mA/1000,20);setGauge('voltage',r.voltage_mV/1000,30);setGauge('power',r.power_W,600);setGauge('speed',r.wheel_speed_valid&&r.wheel_speed_kph!=null?Number(r.wheel_speed_kph):NaN,60);setGauge('accel',r.acceleration_mps2,20);addRow(r);
       if(r.latitude!=null&&r.longitude!=null){const p=[r.latitude,r.longitude];document.getElementById('mapWait').style.display='none';if(!marker){marker=L.circleMarker(p,{radius:8,color:'#fff',fillColor:'#32a7ff',fillOpacity:1}).addTo(map);trail=L.polyline([],{color:'#44d19d',weight:3}).addTo(map);map.setView(p,17)}else marker.setLatLng(p);trailPoints.push(p);while(trailPoints.length>500)trailPoints.shift();trail.setLatLngs(trailPoints);if(!history)map.panTo(p,{animate:true})}
       redraw();
     }
@@ -102,4 +104,3 @@
   </script>
 </body>
 </html>
-

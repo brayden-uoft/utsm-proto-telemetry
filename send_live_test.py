@@ -48,6 +48,8 @@ def main() -> None:
             "ay_x100": round(55 * math.cos(phase * 1.3)),
             "az_x100": 981,
             "amag_x100": round(985 + 25 * math.sin(phase)),
+            "wheel_speed_valid": True,
+            "wheel_speed_kph": round(18 + 9 * (1 + math.sin(phase)), 2),
         }
         if args.gps:
             payload["latitude"] = 39.79917 + 0.00055 * math.sin(phase / 5)
@@ -71,4 +73,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
