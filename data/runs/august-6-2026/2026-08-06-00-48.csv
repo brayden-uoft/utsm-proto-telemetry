@@ -1,0 +1,2 @@
+timestamp_ms,current_mA,voltage_mV,temperature_C,temperature_valid,wheel_speed_valid,wheel_speed_kmph,wheel_rpm,wheel_spoke_count,ax_x100,ay_x100,az_x100,amag_x100,gps_location_valid,gps_lat,gps_long,gps_alt_m,gps_speed_kmph,gps_hdop,gps_sats,gps_time_valid,gps_time_utc,gps_centisecond
+3182623,46,24289,38.71,1,1,0.00,0.0,37718,120,-972,-67,982,1,43.6610562,-79.3949977,104.10,0.24,0.75,12,1,00:48:02,00
