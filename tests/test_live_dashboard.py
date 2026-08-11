@@ -37,6 +37,18 @@ class TestLiveTelemetry(unittest.TestCase):
         self.assertEqual(record.latitude, 39.799)
         self.assertEqual(record.longitude, -86.238)
 
+    def test_optional_wheel_speed(self):
+        record = TelemetryRecord.from_input(
+            self.make_input(wheel_speed_valid=True, wheel_speed_kph=23.45)
+        )
+        self.assertTrue(record.wheel_speed_valid)
+        self.assertEqual(record.wheel_speed_kph, 23.45)
+
+    def test_legacy_payload_has_unavailable_wheel_speed(self):
+        record = TelemetryRecord.from_input(self.make_input())
+        self.assertFalse(record.wheel_speed_valid)
+        self.assertIsNone(record.wheel_speed_kph)
+
     def test_recent_ring_limit(self):
         async def exercise():
             hub = TelemetryHub(max_records=2)
@@ -52,4 +64,3 @@ class TestLiveTelemetry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

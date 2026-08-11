@@ -29,6 +29,8 @@ class TelemetryInput(BaseModel):
     ay_x100: int = Field(ge=-32768, le=32767)
     az_x100: int = Field(ge=-32768, le=32767)
     amag_x100: int = Field(ge=0, le=65535)
+    wheel_speed_valid: bool = False
+    wheel_speed_kph: float | None = Field(default=None, ge=0, le=200)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
 
