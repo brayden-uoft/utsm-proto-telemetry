@@ -17,6 +17,8 @@
     .state { display:flex; align-items:center; gap:9px; font-weight:700; }
     .dot { width:11px; height:11px; border-radius:50%; background:var(--red); }
     .dot.live { background:var(--green); box-shadow:0 0 14px var(--green); }
+    .source-status { display:flex; align-items:center; gap:8px; }
+    .source-status .dot { width:9px; height:9px; flex:0 0 auto; }
     button { border:0; border-radius:9px; padding:11px 18px; font-weight:800; cursor:pointer; }
     #stopButton { background:var(--red); color:white; }
     #startButton { background:var(--green); color:#04160f; }
@@ -30,6 +32,8 @@
     .unit { color:var(--muted); font-size:.42em; font-weight:500; }
     .car .value { color:var(--blue); } .dyno .value { color:var(--orange); } .efficiency .value { color:var(--green); }
     .energy-grid .value { font-size:clamp(28px,4vw,44px); }
+    .electrical { display:flex; gap:18px; margin:14px 0 8px; color:#d9e8f8; font-variant-numeric:tabular-nums; }
+    .electrical strong { color:#fff; font-size:18px; }
     .equation { margin-top:14px; padding:16px 18px; color:#bfd0e3; text-align:center; border:1px dashed #38516f; border-radius:10px; }
     #result { display:none; margin-top:14px; border-color:var(--green); }
     #result.show { display:block; }
@@ -52,8 +56,8 @@
     </section>
 
     <section class="power-grid">
-      <article class="card car"><div class="label">Car input power</div><div class="value"><span id="inputPower">—</span> <span class="unit">W</span></div><div id="carFreshness" class="freshness">Waiting for car</div></article>
-      <article class="card dyno"><div class="label">Dyno output power</div><div class="value"><span id="outputPower">—</span> <span class="unit">W</span></div><div id="dynoFreshness" class="freshness">Waiting for dyno</div></article>
+      <article class="card car"><div class="label">Car input power</div><div class="value"><span id="inputPower">—</span> <span class="unit">W</span></div><div class="electrical"><span><strong id="carVoltage">—</strong> V</span><span><strong id="carCurrent">—</strong> A</span></div><div class="source-status"><span id="carDot" class="dot"></span><span id="carFreshness" class="freshness">Waiting for car</span></div></article>
+      <article class="card dyno"><div class="label">Dyno output power</div><div class="value"><span id="outputPower">—</span> <span class="unit">W</span></div><div class="electrical"><span><strong id="dynoVoltage">—</strong> V</span><span><strong id="dynoCurrent">—</strong> A</span></div><div class="source-status"><span id="dynoDot" class="dot"></span><span id="dynoFreshness" class="freshness">Waiting for dyno</span></div></article>
       <article class="card efficiency"><div class="label">Live efficiency</div><div class="value"><span id="liveEfficiency">—</span> <span class="unit">%</span></div><div class="freshness">output W ÷ input W</div></article>
     </section>
 
@@ -70,7 +74,8 @@
     const byId=id=>document.getElementById(id);
     let currentTest=null;
     const number=(value,digits=1)=>value==null?'—':Number(value).toFixed(digits);
-    const ageText=value=>{if(!value)return 'Waiting for data';const age=(Date.now()-new Date(value).getTime())/1000;return age<5?`Live · ${age.toFixed(1)}s ago`:`Stale · ${age.toFixed(0)}s ago`};
+    const ageSeconds=value=>value?(Date.now()-new Date(value).getTime())/1000:Infinity;
+    const ageText=value=>{if(!value)return 'Waiting for data';const age=ageSeconds(value);return age<8?`Live · ${age.toFixed(1)}s ago`:`Stale · ${age.toFixed(0)}s ago`};
     function render(test){
       currentTest=test;
       if(!test){byId('runState').textContent='No dyno test started';byId('runTime').textContent='Start a test to collect energy';byId('startButton').hidden=false;byId('stopButton').hidden=true;return}
@@ -78,8 +83,10 @@
       const end=test.stopped_at?new Date(test.stopped_at):new Date();const seconds=Math.max(0,(end-new Date(test.started_at))/1000);byId('runTime').textContent=`Elapsed ${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`;
       byId('stopButton').hidden=!active;byId('stopButton').disabled=!active;byId('startButton').hidden=active;
       byId('inputPower').textContent=number(test.input_power_W,1);byId('outputPower').textContent=number(test.output_power_W,1);byId('liveEfficiency').textContent=number(test.live_efficiency_percent,1);
+      byId('carVoltage').textContent=number(test.car_voltage_V,2);byId('carCurrent').textContent=number(test.car_current_A,2);byId('dynoVoltage').textContent=number(test.dyno_voltage_V,3);byId('dynoCurrent').textContent=number(test.dyno_current_A,3);
       byId('inputEnergy').textContent=number(test.input_energy_Wh,3);byId('outputEnergy').textContent=number(test.output_energy_Wh,3);byId('runEfficiency').textContent=number(test.efficiency_percent,1);
       byId('carFreshness').textContent=ageText(test.car_received_at);byId('dynoFreshness').textContent=ageText(test.dyno_received_at);
+      byId('carDot').classList.toggle('live',ageSeconds(test.car_received_at)<8);byId('dynoDot').classList.toggle('live',ageSeconds(test.dyno_received_at)<8);
       if(!active){byId('result').classList.add('show');byId('finalEfficiency').textContent=number(test.efficiency_percent,1);byId('finalSummary').textContent=`${number(test.output_energy_Wh,3)} Wh generated from ${number(test.input_energy_Wh,3)} Wh used.`}else byId('result').classList.remove('show');
     }
     async function load(){try{const response=await fetch('/api/dyno-tests/current');const body=await response.json();render(body.test)}catch(error){byId('runState').textContent='Dashboard connection failed'}}

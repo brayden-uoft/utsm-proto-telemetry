@@ -164,6 +164,18 @@ class DynoTestSession:
             "input_energy_Wh": input_Wh,
             "output_energy_Wh": output_Wh,
             "efficiency_percent": efficiency,
+            "car_current_A": (
+                self.latest_car.current_mA / 1000.0 if self.latest_car else None
+            ),
+            "car_voltage_V": (
+                self.latest_car.voltage_mV / 1000.0 if self.latest_car else None
+            ),
+            "dyno_current_A": (
+                self.latest_dyno.current_mA / 1000.0 if self.latest_dyno else None
+            ),
+            "dyno_voltage_V": (
+                self.latest_dyno.voltage_mV / 1000.0 if self.latest_dyno else None
+            ),
             "car_received_at": (
                 self.latest_car.received_at.isoformat() if self.latest_car else None
             ),

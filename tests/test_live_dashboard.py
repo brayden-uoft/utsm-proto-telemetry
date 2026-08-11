@@ -117,6 +117,10 @@ class TestLiveTelemetry(unittest.TestCase):
         self.assertAlmostEqual(result["input_energy_Wh"], 100.0)
         self.assertAlmostEqual(result["output_energy_Wh"], 50.0)
         self.assertAlmostEqual(result["efficiency_percent"], 50.0)
+        self.assertAlmostEqual(result["car_current_A"], 4.0)
+        self.assertAlmostEqual(result["car_voltage_V"], 25.0)
+        self.assertAlmostEqual(result["dyno_current_A"], 2.0)
+        self.assertAlmostEqual(result["dyno_voltage_V"], 24.0)
 
 
 if __name__ == "__main__":
