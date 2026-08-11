@@ -7,6 +7,8 @@ import json
 import math
 import os
 import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 
 try:
@@ -42,6 +44,7 @@ from utsm_telemetry import (
 )
 
 DEFAULT_RUNS_DIR = os.path.join("data", "runs")
+DEFAULT_TRACKS_DIR = os.path.join("data", "tracks")
 DEFAULT_OUTPUT = os.path.join("outputs", "telemetry_strategy_dashboard.html")
 
 METRICS = {
@@ -95,6 +98,14 @@ def parse_args() -> argparse.Namespace:
             "Directory containing one subfolder per run, each with exactly one "
             ".gpx file and one telemetry .csv file. New runs are picked up "
             "automatically just by adding a folder here (default: data/runs)."
+        ),
+    )
+    parser.add_argument(
+        "--tracks-dir",
+        default=DEFAULT_TRACKS_DIR,
+        help=(
+            "Directory containing reference-track subfolders. Files ending in "
+            "-centerline.gpx are added to the dashboard map selector."
         ),
     )
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT)
@@ -216,6 +227,186 @@ def resolve_run_specs(args: argparse.Namespace) -> list[dict[str, str]]:
             "or pass --gps/--telemetry for a single one-off run."
         )
     return runs
+
+
+def discover_reference_tracks(tracks_dir: str) -> list[dict[str, str]]:
+    """Discover geometry-only GPX centerlines for the dashboard map selector."""
+    if not os.path.isdir(tracks_dir):
+        return []
+    tracks: list[dict[str, str]] = []
+    for entry in sorted(os.listdir(tracks_dir)):
+        track_dir = os.path.join(tracks_dir, entry)
+        if not os.path.isdir(track_dir) or entry.startswith("."):
+            continue
+        files = sorted(
+            name for name in os.listdir(track_dir)
+            if name.lower().endswith("-centerline.gpx")
+        )
+        if len(files) != 1:
+            if files:
+                print(
+                    f"WARNING: skipping reference track '{entry}' - expected one "
+                    f"*-centerline.gpx file, found {len(files)}.",
+                    file=sys.stderr,
+                )
+            continue
+        tracks.append({
+            "id": _slugify(entry),
+            "label": _prettify(entry),
+            "gps": os.path.join(track_dir, files[0]),
+        })
+    return tracks
+
+
+def load_reference_track(spec: dict[str, str]) -> dict[str, Any]:
+    """Load reference geometry and an optional model-derived strategy overlay."""
+    root = ET.parse(spec["gps"]).getroot()
+    namespace = {"gpx": "http://www.topografix.com/GPX/1/1"}
+    points = [
+        (float(node.attrib["lat"]), float(node.attrib["lon"]))
+        for node in root.findall("gpx:trk/gpx:trkseg/gpx:trkpt", namespace)
+    ]
+    if len(points) < 3:
+        raise ValueError(f"Reference track '{spec['gps']}' has fewer than three points.")
+    frame = pd.DataFrame(points, columns=["lat", "lon"])
+    xy = add_xy(frame)
+    samples = [
+        {"x": finite_float(row.x, 2), "y": finite_float(row.y, 2)}
+        for row in xy.itertuples(index=False)
+    ]
+    segment_lengths = np.hypot(np.diff(xy["x"]), np.diff(xy["y"]))
+    length_m = float(np.sum(segment_lengths))
+    strategy_meta: dict[str, Any] | None = None
+    centerline_path = Path(spec["gps"])
+    stem = centerline_path.name.removesuffix("-centerline.gpx")
+    strategy_path = centerline_path.with_name(f"{stem}-efficiency-strategy.csv")
+    segments_path = centerline_path.with_name(f"{stem}-strategy-segments.csv")
+    report_path = centerline_path.with_name(f"{stem}-strategy-report.txt")
+    if strategy_path.is_file() and segments_path.is_file():
+        strategy_points = pd.read_csv(strategy_path)
+        strategy_segments = pd.read_csv(segments_path)
+        required = {"x", "y", "target_speed_kph", "action", "pred_current_mA", "pred_power_w"}
+        missing = required.difference(strategy_points.columns)
+        if missing:
+            raise ValueError(
+                f"Reference strategy '{strategy_path}' is missing: {', '.join(sorted(missing))}"
+            )
+        samples = [
+            {
+                "x": finite_float(row.x, 2),
+                "y": finite_float(row.y, 2),
+                "targetSpeed": finite_float(row.target_speed_kph, 2),
+                "strategyAction": str(row.action),
+                "predCurrent": finite_float(row.pred_current_mA, 0),
+                "predPower": finite_float(row.pred_power_w, 2),
+                "segment": int(row.segment),
+                "distance": finite_float(row.distance_m, 2),
+            }
+            for row in strategy_points.itertuples(index=False)
+        ]
+        if "distance_m" in strategy_points.columns:
+            length_m = float(pd.to_numeric(strategy_points["distance_m"], errors="coerce").max())
+        speed = pd.to_numeric(strategy_points["target_speed_kph"], errors="coerce")
+        strategy_meta = {
+            "source": str(strategy_path),
+            "model_derived": True,
+            "target_speed_min_kph": finite_float(speed.min(), 1),
+            "target_speed_max_kph": finite_float(speed.max(), 1),
+            "target_speed_mean_kph": finite_float(speed.mean(), 1),
+        }
+        time_budget = pd.to_numeric(
+            strategy_segments.get("time_budget_sec", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        if time_budget.empty:
+            raise ValueError(f"Reference strategy '{segments_path}' has no time budget.")
+        predicted_time = float(
+            pd.to_numeric(strategy_segments["segment_time_s"], errors="coerce").sum()
+        )
+        predicted_energy = float(
+            pd.to_numeric(strategy_segments["pred_energy_j"], errors="coerce").sum()
+        )
+        action = strategy_segments["action"].astype(str)
+        coast_mask = action.eq("coast")
+        over_flags = strategy_segments["over_fuse_limit"].astype(bool).tolist()
+        over_durations = pd.to_numeric(
+            strategy_segments["fuse_over_duration_s"], errors="coerce"
+        ).fillna(0.0).tolist()
+        strategy_meta.update({
+            "target_lap_time_s": finite_float(time_budget.iloc[0], 1),
+            "predicted_lap_time_s": finite_float(predicted_time, 1),
+            "predicted_energy_j": finite_float(predicted_energy, 1),
+            "energy_intensity_j_km": finite_float(predicted_energy / (length_m / 1000.0), 1),
+            "peak_current_mA": finite_float(
+                pd.to_numeric(strategy_segments["pred_peak_current_mA"], errors="coerce").max(), 0
+            ),
+            "peak_power_w": finite_float(
+                pd.to_numeric(strategy_segments["pred_power_w"], errors="coerce").max(), 1
+            ),
+            "total_over_fuse_s": finite_float(sum(over_durations), 2),
+            "longest_over_fuse_s": finite_float(
+                longest_true_duration(over_flags, over_durations), 2
+            ),
+            "coast_time_s": finite_float(
+                pd.to_numeric(
+                    strategy_segments.loc[coast_mask, "segment_time_s"], errors="coerce"
+                ).sum(),
+                1,
+            ),
+            "coast_distance_m": finite_float(
+                pd.to_numeric(
+                    strategy_segments.loc[coast_mask, "length_m"], errors="coerce"
+                ).sum(),
+                1,
+            ),
+            "segment_count": int(len(strategy_segments)),
+            "accelerate_count": int(action.eq("accelerate").sum()),
+            "hold_count": int(action.eq("hold").sum()),
+            "coast_count": int(coast_mask.sum()),
+            "time_error_pct": finite_float(
+                (predicted_time - float(time_budget.iloc[0])) / float(time_budget.iloc[0]) * 100.0,
+                2,
+            ),
+            "report": (
+                report_path.read_text(encoding="utf-8")
+                if report_path.is_file()
+                else "Model-derived reference strategy."
+            ),
+            "segments": [
+                {
+                    "segment": int(row.segment),
+                    "start": finite_float(row.dist_start_m, 1),
+                    "end": finite_float(row.dist_end_m, 1),
+                    "action": str(row.action),
+                    "speed": finite_float(row.target_speed_kph, 1),
+                    "current": finite_float(row.pred_current_mA, 0),
+                    "power": finite_float(row.pred_power_w, 1),
+                    "time": finite_float(row.segment_time_s, 2),
+                    "energy": finite_float(row.pred_energy_j, 1),
+                }
+                for row in strategy_segments.itertuples(index=False)
+            ],
+        })
+    return {
+        "id": spec["id"],
+        "label": spec["label"],
+        "meta": {
+            "gps": spec["gps"],
+            "sample_count": len(samples),
+            "length_m": finite_float(length_m, 1),
+            "geometry_only": True,
+            "strategy": strategy_meta,
+        },
+        "samples": samples,
+        "domains": {
+            "x": domain(pd.Series([sample["x"] for sample in samples])),
+            "y": domain(pd.Series([sample["y"] for sample in samples])),
+            "targetSpeed": (
+                domain(pd.Series([sample["targetSpeed"] for sample in samples]), min_zero=True)
+                if strategy_meta else None
+            ),
+        },
+    }
 
 
 def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, str]:
@@ -748,12 +939,19 @@ def make_run_payload(
     }
 
 
-def make_payload(run_payloads: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
+def make_payload(
+    run_payloads: list[dict[str, Any]],
+    args: argparse.Namespace,
+    reference_tracks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    reference_tracks = reference_tracks or []
     return {
         "title": "UTSM Strategy Dashboard",
         "defaultRun": run_payloads[0]["id"],
         "runOrder": [run["id"] for run in run_payloads],
         "runs": {run["id"]: run for run in run_payloads},
+        "trackOrder": [track["id"] for track in reference_tracks],
+        "tracks": {track["id"]: track for track in reference_tracks},
         "metrics": {
             key: {
                 "label": spec["label"],
@@ -964,6 +1162,43 @@ def build_html(payload: dict[str, Any]) -> str:
       grid-template-rows: repeat(6, 118px);
       gap: 10px;
     }}
+    .reference-strategy {{ display: none; }}
+    .reference-note {{
+      margin: 0 0 10px;
+      padding: 10px;
+      border: 1px solid #f59e0b;
+      border-radius: 6px;
+      background: #fffbeb;
+      color: #78350f;
+      font-size: 12px;
+      line-height: 1.4;
+    }}
+    .reference-chart {{
+      width: 100%;
+      border: 1px solid #d9dee6;
+      margin-bottom: 10px;
+    }}
+    .strategy-table-wrap {{ max-height: 410px; overflow: auto; border: 1px solid #d9dee6; }}
+    .strategy-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .strategy-table th, .strategy-table td {{
+      padding: 6px 7px;
+      border-bottom: 1px solid #e5e9ef;
+      text-align: right;
+      white-space: nowrap;
+    }}
+    .strategy-table th {{ position: sticky; top: 0; background: #f8fafc; color: #475569; }}
+    .strategy-table th:nth-child(2), .strategy-table td:nth-child(2) {{ text-align: left; }}
+    .action-badge {{
+      display: inline-block;
+      min-width: 72px;
+      padding: 3px 6px;
+      border-radius: 999px;
+      color: #fff;
+      text-align: center;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: .03em;
+    }}
     .chart {{ border: 1px solid #d9dee6; }}
     .strategy-summary {{
       display: grid;
@@ -1042,6 +1277,9 @@ def build_html(payload: dict[str, Any]) -> str:
           <label>Run
             <select id="runSelect"></select>
           </label>
+          <label>Map
+            <select id="trackSelect"></select>
+          </label>
           <input id="timeSlider" class="slider-control" type="range" min="0" max="0" value="0" step="0.1">
           <button id="playButton" type="button">Play</button>
           <label>Metric
@@ -1067,19 +1305,29 @@ def build_html(payload: dict[str, Any]) -> str:
       </div>
       <div class="panel">
         <div class="strategy-summary">
-          <div class="summary-card"><span>Energy delta</span><strong id="energyDeltaValue"></strong></div>
-          <div class="summary-card"><span>Pred time</span><strong id="predTimeValue"></strong></div>
-          <div class="summary-card"><span>Time > 20A</span><strong id="overFuseValue"></strong></div>
-          <div class="summary-card"><span>Longest burst</span><strong id="longestFuseValue"></strong></div>
-          <div class="summary-card"><span>Pred peak current</span><strong id="peakCurrentValue"></strong></div>
-          <div class="summary-card"><span>Coast time</span><strong id="coastTimeValue"></strong></div>
-          <div class="summary-card"><span>Coast distance</span><strong id="coastDistanceValue"></strong></div>
-          <div class="summary-card"><span>Pulse segments</span><strong id="pulseCountValue"></strong></div>
-          <div class="summary-card"><span>Time error</span><strong id="timeErrorValue"></strong></div>
-          <div class="summary-card"><span>Gear estimate</span><strong id="gearValue"></strong></div>
+          <div class="summary-card"><span id="energyDeltaLabel">Energy delta</span><strong id="energyDeltaValue"></strong></div>
+          <div class="summary-card"><span id="predTimeLabel">Pred time</span><strong id="predTimeValue"></strong></div>
+          <div class="summary-card"><span id="overFuseLabel">Time &gt; 20A</span><strong id="overFuseValue"></strong></div>
+          <div class="summary-card"><span id="longestFuseLabel">Longest burst</span><strong id="longestFuseValue"></strong></div>
+          <div class="summary-card"><span id="peakCurrentLabel">Pred peak current</span><strong id="peakCurrentValue"></strong></div>
+          <div class="summary-card"><span id="coastTimeLabel">Coast time</span><strong id="coastTimeValue"></strong></div>
+          <div class="summary-card"><span id="coastDistanceLabel">Coast distance</span><strong id="coastDistanceValue"></strong></div>
+          <div class="summary-card"><span id="pulseCountLabel">Pulse segments</span><strong id="pulseCountValue"></strong></div>
+          <div class="summary-card"><span id="timeErrorLabel">Time error</span><strong id="timeErrorValue"></strong></div>
+          <div class="summary-card"><span id="gearLabel">Gear estimate</span><strong id="gearValue"></strong></div>
         </div>
         <div class="charts" id="charts"></div>
         <div class="legend-stack" id="chartLegend"></div>
+        <div class="reference-strategy" id="referenceStrategy">
+          <p class="reference-note">Transferred-model preview. These are predicted targets, not measured Autodrome telemetry.</p>
+          <div id="referenceSpeedChart"></div>
+          <div class="strategy-table-wrap">
+            <table class="strategy-table">
+              <thead><tr><th>#</th><th>Action</th><th>Distance</th><th>Target</th><th>Current</th><th>Power</th><th>Energy</th></tr></thead>
+              <tbody id="referenceStrategyRows"></tbody>
+            </table>
+          </div>
+        </div>
         <details>
           <summary>Strategy report</summary>
           <pre id="reportText"></pre>
@@ -1112,6 +1360,7 @@ def build_html(payload: dict[str, Any]) -> str:
     const metricKeys = Object.keys(metricSpecs).filter(k => metricSpecs[k].map_selectable !== false);
     const state = {{
       runId: DATA.defaultRun,
+      trackId: "run",
       index: 0,
       metric: "speed",
       playing: false,
@@ -1121,6 +1370,7 @@ def build_html(payload: dict[str, Any]) -> str:
     const el = {{
       metaText: document.getElementById("metaText"),
       runSelect: document.getElementById("runSelect"),
+      trackSelect: document.getElementById("trackSelect"),
       timeSlider: document.getElementById("timeSlider"),
       playButton: document.getElementById("playButton"),
       metricSelect: document.getElementById("metricSelect"),
@@ -1134,17 +1384,30 @@ def build_html(payload: dict[str, Any]) -> str:
       predCurrentValue: document.getElementById("predCurrentValue"),
       predPowerValue: document.getElementById("predPowerValue"),
       energyDeltaValue: document.getElementById("energyDeltaValue"),
+      energyDeltaLabel: document.getElementById("energyDeltaLabel"),
       predTimeValue: document.getElementById("predTimeValue"),
+      predTimeLabel: document.getElementById("predTimeLabel"),
       overFuseValue: document.getElementById("overFuseValue"),
+      overFuseLabel: document.getElementById("overFuseLabel"),
       longestFuseValue: document.getElementById("longestFuseValue"),
+      longestFuseLabel: document.getElementById("longestFuseLabel"),
       peakCurrentValue: document.getElementById("peakCurrentValue"),
+      peakCurrentLabel: document.getElementById("peakCurrentLabel"),
       coastTimeValue: document.getElementById("coastTimeValue"),
+      coastTimeLabel: document.getElementById("coastTimeLabel"),
       coastDistanceValue: document.getElementById("coastDistanceValue"),
+      coastDistanceLabel: document.getElementById("coastDistanceLabel"),
       pulseCountValue: document.getElementById("pulseCountValue"),
+      pulseCountLabel: document.getElementById("pulseCountLabel"),
       timeErrorValue: document.getElementById("timeErrorValue"),
+      timeErrorLabel: document.getElementById("timeErrorLabel"),
       gearValue: document.getElementById("gearValue"),
+      gearLabel: document.getElementById("gearLabel"),
       reportText: document.getElementById("reportText"),
       chartLegend: document.getElementById("chartLegend"),
+      referenceStrategy: document.getElementById("referenceStrategy"),
+      referenceSpeedChart: document.getElementById("referenceSpeedChart"),
+      referenceStrategyRows: document.getElementById("referenceStrategyRows"),
       strategyLegend: document.getElementById("strategyLegend"),
       metricLegend: document.getElementById("metricLegend"),
       legendTitle: document.getElementById("legendTitle"),
@@ -1166,6 +1429,14 @@ def build_html(payload: dict[str, Any]) -> str:
       return DATA.runs[state.runId];
     }}
 
+    function getReferenceTrack() {{
+      return state.trackId === "run" ? null : DATA.tracks[state.trackId];
+    }}
+
+    function getMapGeometry() {{
+      return getReferenceTrack() || getRun();
+    }}
+
     function clamp(v, lo, hi) {{
       return Math.max(lo, Math.min(hi, v));
     }}
@@ -1178,11 +1449,11 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function xMap(x) {{
-      return scaleLinear(x, getRun().domains.x, [PAD, W - PAD]);
+      return scaleLinear(x, getMapGeometry().domains.x, [PAD, W - PAD]);
     }}
 
     function yMap(y) {{
-      return scaleLinear(y, getRun().domains.y, [H - PAD, PAD]);
+      return scaleLinear(y, getMapGeometry().domains.y, [H - PAD, PAD]);
     }}
 
     function chartX(t) {{
@@ -1227,8 +1498,8 @@ def build_html(payload: dict[str, Any]) -> str:
       return getRun().laps.find(item => item.lap === lap);
     }}
 
-    function colorForMetric(value, key) {{
-      const [lo, hi] = getRun().domains.metrics[key];
+    function colorForDomain(value, valueDomain) {{
+      const [lo, hi] = valueDomain;
       const ratio = clamp((value - lo) / (hi - lo || 1), 0, 1);
       const stops = [[45,10,115],[126,3,168],[204,71,120],[248,149,64],[240,249,33]];
       const scaled = ratio * (stops.length - 1);
@@ -1238,6 +1509,10 @@ def build_html(payload: dict[str, Any]) -> str:
       const b = stops[idx + 1];
       const rgb = a.map((v, i) => Math.round(v + (b[i] - v) * local));
       return `rgb(${{rgb[0]}},${{rgb[1]}},${{rgb[2]}})`;
+    }}
+
+    function colorForMetric(value, key) {{
+      return colorForDomain(value, getRun().domains.metrics[key]);
     }}
 
     function format(value, digits, suffix) {{
@@ -1258,11 +1533,15 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawFullTrack() {{
-      const samples = runSamples();
+      const samples = getMapGeometry().samples;
       el.fullTrack.setAttribute("d", linePath(samples, s => xMap(s.x), s => yMap(s.y)));
     }}
 
     function drawBoundaries() {{
+      if (getReferenceTrack()) {{
+        el.lapBoundaryLayer.innerHTML = "";
+        return;
+      }}
       const samples = runSamples();
       el.lapBoundaryLayer.innerHTML = getRun().laps.map(lap => {{
         const s = samples[lap.start];
@@ -1271,6 +1550,50 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawStrategy(index) {{
+      const referenceTrack = getReferenceTrack();
+      if (referenceTrack) {{
+        el.labelLayer.innerHTML = "";
+        if (!el.showStrategy.checked || !referenceTrack.meta.strategy) {{
+          el.strategyLayer.innerHTML = "";
+          return;
+        }}
+        const rows = referenceTrack.samples;
+        let markup = "";
+        const actionMode = el.colorMode.value === "action";
+        for (let i = 1; i < rows.length; i++) {{
+          const a = rows[i - 1];
+          const b = rows[i];
+          const color = actionMode
+            ? (ACTION_COLORS[b.strategyAction] || "#64748b")
+            : colorForDomain(b.targetSpeed, referenceTrack.domains.targetSpeed);
+          markup += `<line x1="${{xMap(a.x).toFixed(1)}}" y1="${{yMap(a.y).toFixed(1)}}" x2="${{xMap(b.x).toFixed(1)}}" y2="${{yMap(b.y).toFixed(1)}}" stroke="${{color}}" stroke-width="${{actionMode ? 10 : 8}}" stroke-linecap="round" opacity="0.96"/>`;
+        }}
+        el.strategyLayer.innerHTML = markup;
+        if (!actionMode || !el.showLabels.checked) return;
+        const groups = [];
+        for (const segment of referenceTrack.meta.strategy.segments) {{
+          const previous = groups[groups.length - 1];
+          if (previous && previous.action === segment.action) {{
+            previous.end = segment.end;
+          }} else {{
+            groups.push({{action: segment.action, start: segment.start, end: segment.end}});
+          }}
+        }}
+        el.labelLayer.innerHTML = groups.map(group => {{
+          const midpoint = (group.start + group.end) / 2;
+          const point = rows.reduce(
+            (best, candidate) => Math.abs(candidate.distance - midpoint) < Math.abs(best.distance - midpoint) ? candidate : best,
+            rows[0]
+          );
+          const color = ACTION_COLORS[group.action] || "#64748b";
+          const text = group.action === "accelerate" ? "ACCEL" : group.action.toUpperCase();
+          const width = text.length * 7 + 16;
+          const x = xMap(point.x);
+          const y = yMap(point.y);
+          return `<g><rect x="${{x - width / 2}}" y="${{y - 11}}" width="${{width}}" height="22" rx="11" fill="rgba(255,255,255,0.96)" stroke="${{color}}" stroke-width="2"/><text x="${{x}}" y="${{y + 4}}" text-anchor="middle" style="fill:${{color}};font-size:10px;font-weight:800">${{text}}</text></g>`;
+        }}).join("");
+        return;
+      }}
       const samples = runSamples();
       const range = currentLapRange(index);
       if (!el.showStrategy.checked) {{
@@ -1307,6 +1630,10 @@ def build_html(payload: dict[str, Any]) -> str:
     }}
 
     function drawTrail(index) {{
+      if (getReferenceTrack()) {{
+        el.trailLayer.innerHTML = "";
+        return;
+      }}
       const samples = runSamples();
       const range = currentLapRange(index);
       const rows = samples.slice(range.start, index + 1);
@@ -1420,7 +1747,97 @@ def build_html(payload: dict[str, Any]) -> str:
       }});
     }}
 
+    function setSummaryLabels(labels) {{
+      el.energyDeltaLabel.textContent = labels[0];
+      el.predTimeLabel.textContent = labels[1];
+      el.overFuseLabel.textContent = labels[2];
+      el.longestFuseLabel.textContent = labels[3];
+      el.peakCurrentLabel.textContent = labels[4];
+      el.coastTimeLabel.textContent = labels[5];
+      el.coastDistanceLabel.textContent = labels[6];
+      el.pulseCountLabel.textContent = labels[7];
+      el.timeErrorLabel.textContent = labels[8];
+      el.gearLabel.textContent = labels[9];
+    }}
+
+    function renderReferenceStrategy(strategy, trackLength) {{
+      const width = 620;
+      const height = 190;
+      const pad = {{left: 48, right: 14, top: 24, bottom: 32}};
+      const minSpeed = Math.floor(strategy.target_speed_min_kph - 1);
+      const maxSpeed = Math.ceil(strategy.target_speed_max_kph + 1);
+      const sx = distance => pad.left + distance / trackLength * (width - pad.left - pad.right);
+      const sy = speed => height - pad.bottom - (speed - minSpeed) / (maxSpeed - minSpeed) * (height - pad.top - pad.bottom);
+      const backgrounds = strategy.segments.map(segment =>
+        `<rect x="${{sx(segment.start).toFixed(1)}}" y="${{pad.top}}" width="${{Math.max(1, sx(segment.end) - sx(segment.start)).toFixed(1)}}" height="${{height - pad.top - pad.bottom}}" fill="${{ACTION_COLORS[segment.action] || "#64748b"}}" opacity="0.12"/>`
+      ).join("");
+      let path = "";
+      strategy.segments.forEach((segment, index) => {{
+        const x0 = sx(segment.start);
+        const x1 = sx(segment.end);
+        const y = sy(segment.speed);
+        path += index === 0 ? `M${{x0.toFixed(1)}} ${{y.toFixed(1)}}` : `V${{y.toFixed(1)}}`;
+        path += `H${{x1.toFixed(1)}}`;
+      }});
+      const yTicks = [minSpeed, Math.round((minSpeed + maxSpeed) / 2), maxSpeed].map(value =>
+        `<g><line x1="${{pad.left}}" x2="${{width-pad.right}}" y1="${{sy(value)}}" y2="${{sy(value)}}" stroke="#e2e8f0"/><text x="${{pad.left-7}}" y="${{sy(value)+4}}" text-anchor="end" class="tick-label">${{value}}</text></g>`
+      ).join("");
+      el.referenceSpeedChart.innerHTML = `
+        <svg class="reference-chart" viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="Autodrome modeled target speed by distance">
+          <text x="${{pad.left}}" y="16" class="axis-label">Target speed by distance — backgrounds show ACCELERATE / HOLD / COAST</text>
+          ${{backgrounds}}${{yTicks}}
+          <path d="${{path}}" fill="none" stroke="#2563eb" stroke-width="3"/>
+          <text x="${{width/2}}" y="${{height-7}}" text-anchor="middle" class="axis-label">Lap distance (m)</text>
+          <text x="13" y="${{height/2}}" transform="rotate(-90 13 ${{height/2}})" text-anchor="middle" class="axis-label">km/h</text>
+        </svg>`;
+      el.referenceStrategyRows.innerHTML = strategy.segments.map(segment => {{
+        const color = ACTION_COLORS[segment.action] || "#64748b";
+        return `<tr>
+          <td>${{segment.segment}}</td>
+          <td><span class="action-badge" style="background:${{color}}">${{segment.action.toUpperCase()}}</span></td>
+          <td>${{segment.start.toFixed(0)}}–${{segment.end.toFixed(0)}} m</td>
+          <td>${{segment.speed.toFixed(1)}} km/h</td>
+          <td>${{(segment.current/1000).toFixed(1)}} A</td>
+          <td>${{segment.power.toFixed(1)}} W</td>
+          <td>${{segment.energy.toFixed(0)}} J</td>
+        </tr>`;
+      }}).join("");
+    }}
+
     function updateSummary() {{
+      const referenceTrack = getReferenceTrack();
+      const referenceStrategy = referenceTrack?.meta.strategy;
+      if (referenceStrategy) {{
+        setSummaryLabels([
+          "Pred energy", "Pred lap time", "Lap-time limit", "Track length",
+          "Pred peak current", "Coast time", "Coast distance", "A / H / C segments",
+          "Time margin", "Model status"
+        ]);
+        el.energyDeltaValue.textContent = `${{(referenceStrategy.predicted_energy_j / 1000).toFixed(2)}} kJ`;
+        el.predTimeValue.textContent = `${{referenceStrategy.predicted_lap_time_s.toFixed(1)}} s`;
+        el.overFuseValue.textContent = `${{referenceStrategy.target_lap_time_s.toFixed(1)}} s`;
+        el.longestFuseValue.textContent = `${{referenceTrack.meta.length_m.toFixed(1)}} m`;
+        el.peakCurrentValue.textContent = `${{(referenceStrategy.peak_current_mA / 1000).toFixed(1)}} A`;
+        el.coastTimeValue.textContent = `${{referenceStrategy.coast_time_s.toFixed(1)}} s`;
+        el.coastDistanceValue.textContent = `${{referenceStrategy.coast_distance_m.toFixed(0)}} m`;
+        el.pulseCountValue.textContent = `${{referenceStrategy.accelerate_count}} / ${{referenceStrategy.hold_count}} / ${{referenceStrategy.coast_count}}`;
+        el.timeErrorValue.textContent = `${{(referenceStrategy.target_lap_time_s - referenceStrategy.predicted_lap_time_s).toFixed(1)}} s`;
+        el.gearValue.textContent = "Transferred";
+        el.reportText.textContent = referenceStrategy.report;
+        el.charts.style.display = "none";
+        el.chartLegend.style.display = "none";
+        el.referenceStrategy.style.display = "block";
+        renderReferenceStrategy(referenceStrategy, referenceTrack.meta.length_m);
+        return;
+      }}
+      setSummaryLabels([
+        "Energy delta", "Pred time", "Time > 20A", "Longest burst",
+        "Pred peak current", "Coast time", "Coast distance", "Pulse segments",
+        "Time error", "Gear estimate"
+      ]);
+      el.charts.style.display = "grid";
+      el.chartLegend.style.display = "grid";
+      el.referenceStrategy.style.display = "none";
       const strategy = getRun().strategy;
       el.energyDeltaValue.textContent = `${{strategy.delta_energy_pct.toFixed(2)}}%`;
       el.predTimeValue.textContent = `${{strategy.predicted_time_s.toFixed(1)}} s`;
@@ -1438,34 +1855,82 @@ def build_html(payload: dict[str, Any]) -> str:
     function update(index) {{
       const run = getRun();
       const samples = runSamples();
+      const referenceTrack = getReferenceTrack();
       state.index = clamp(index, 0, samples.length - 1);
       const row = samples[state.index];
       const lapRange = currentLapRange(state.index);
       const lapStart = samples[lapRange.start];
       el.timeSlider.value = row.t;
-      el.carMarker.setAttribute("cx", xMap(row.x));
-      el.carMarker.setAttribute("cy", yMap(row.y));
-      el.lapStartMarker.setAttribute("cx", xMap(lapStart.x));
-      el.lapStartMarker.setAttribute("cy", yMap(lapStart.y));
-      drawStrategy(state.index);
-      drawTrail(state.index);
-      drawBoundaries();
+      if (referenceTrack) {{
+        const start = referenceTrack.samples[0];
+        const strategy = referenceTrack.meta.strategy;
+        el.carMarker.style.display = "none";
+        el.lapStartMarker.style.display = "";
+        el.lapStartMarker.setAttribute("cx", xMap(start.x));
+        el.lapStartMarker.setAttribute("cy", yMap(start.y));
+        drawStrategy(state.index);
+        drawTrail(state.index);
+        drawBoundaries();
+        if (strategy) {{
+          const modeText = el.colorMode.value === "action"
+            ? "action regions: orange ACCELERATE, blue HOLD, green COAST"
+            : "target-speed gradient: purple slower, yellow faster";
+          el.mapReadout.textContent = `${{referenceTrack.label}} | ${{modeText}} | ${{referenceTrack.meta.length_m.toFixed(1)}} m | predicted ${{strategy.predicted_lap_time_s.toFixed(1)}} s / ${{strategy.target_lap_time_s.toFixed(1)}} s limit | ${{strategy.predicted_energy_j.toFixed(0)}} J`;
+          el.legendMin.textContent = strategy.target_speed_min_kph.toFixed(1);
+          el.legendMax.textContent = strategy.target_speed_max_kph.toFixed(1);
+          el.legendTitle.textContent = "Modeled target speed (km/h)";
+          el.metricLegend.style.display = el.colorMode.value === "metric" ? "grid" : "none";
+        }} else {{
+          el.mapReadout.textContent = `${{referenceTrack.label}} | geometry only | ${{referenceTrack.meta.length_m.toFixed(1)}} m | ${{referenceTrack.meta.sample_count}} points | no strategy supplied`;
+          el.metricLegend.style.display = "none";
+        }}
+      }} else {{
+        el.carMarker.style.display = "";
+        el.lapStartMarker.style.display = "";
+        el.carMarker.setAttribute("cx", xMap(row.x));
+        el.carMarker.setAttribute("cy", yMap(row.y));
+        el.lapStartMarker.setAttribute("cx", xMap(lapStart.x));
+        el.lapStartMarker.setAttribute("cy", yMap(lapStart.y));
+        drawStrategy(state.index);
+        drawTrail(state.index);
+        drawBoundaries();
+      }}
       updateCharts(state.index);
-      el.timeText.textContent = `t=${{row.t.toFixed(1)}}s / ${{run.meta.duration_s.toFixed(1)}}s`;
+      el.timeText.textContent = referenceTrack
+        ? "Reference strategy (no recorded lap playback)"
+        : `t=${{row.t.toFixed(1)}}s / ${{run.meta.duration_s.toFixed(1)}}s`;
+      el.timeSlider.disabled = Boolean(referenceTrack);
+      el.playButton.disabled = Boolean(referenceTrack);
       const metric = metricSpecs[state.metric];
       const metricValue = row[metric.field];
-      el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  pulse=${{row.pulseDuration.toFixed(1)}}s coast=${{row.coastDuration.toFixed(1)}}s  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
-      el.lapValue.textContent = String(row.lap);
-      el.strategyValue.textContent = row.strategyAction;
-      el.targetSpeedValue.textContent = format(row.targetSpeed, 1, " km/h");
-      el.predCurrentValue.textContent = format(row.predCurrent, 0, " mA");
-      el.predPowerValue.textContent = format(row.predPower, 1, " W");
-      const domain = run.domains.metrics[state.metric];
-      el.legendMin.textContent = domain[0].toFixed(1);
-      el.legendMax.textContent = domain[1].toFixed(1);
-      el.legendTitle.textContent = `Trail color: ${{metric.label}} (${{metric.unit}})`;
-      el.metricLegend.style.display = "grid";
-      el.metaText.textContent = `${{run.label}} | ${{run.meta.sample_count}} samples | ${{run.meta.duration_s.toFixed(1)}}s | energy delta ${{run.strategy.delta_energy_pct.toFixed(2)}}%`;
+      if (!referenceTrack) {{
+        el.mapReadout.textContent = `t=${{row.t.toFixed(1)}}s  lap=${{row.lap}}  seg=${{row.segment}}  speed=${{row.speed.toFixed(1)}} km/h  action=${{row.strategyAction}}  pred avg=${{row.predCurrent.toFixed(0)}} mA  pred peak=${{row.predPeakCurrent.toFixed(0)}} mA  pulse=${{row.pulseDuration.toFixed(1)}}s coast=${{row.coastDuration.toFixed(1)}}s  ${{metric.label}}=${{format(metricValue, 2, " " + metric.unit)}}`;
+      }}
+      if (referenceTrack && referenceTrack.meta.strategy) {{
+        const strategy = referenceTrack.meta.strategy;
+        el.lapValue.textContent = "model";
+        el.strategyValue.textContent = `${{strategy.accelerate_count}}A / ${{strategy.hold_count}}H / ${{strategy.coast_count}}C`;
+        el.targetSpeedValue.textContent = `${{strategy.target_speed_min_kph.toFixed(1)}}-${{strategy.target_speed_max_kph.toFixed(1)}} km/h`;
+        el.predCurrentValue.textContent = `${{(strategy.peak_current_mA / 1000).toFixed(1)}} A peak`;
+        el.predPowerValue.textContent = `${{strategy.peak_power_w.toFixed(1)}} W peak`;
+      }} else {{
+        el.lapValue.textContent = String(row.lap);
+        el.strategyValue.textContent = row.strategyAction;
+        el.targetSpeedValue.textContent = format(row.targetSpeed, 1, " km/h");
+        el.predCurrentValue.textContent = format(row.predCurrent, 0, " mA");
+        el.predPowerValue.textContent = format(row.predPower, 1, " W");
+      }}
+      if (!referenceTrack) {{
+        const domain = run.domains.metrics[state.metric];
+        el.legendMin.textContent = domain[0].toFixed(1);
+        el.legendMax.textContent = domain[1].toFixed(1);
+        el.legendTitle.textContent = `Trail color: ${{metric.label}} (${{metric.unit}})`;
+        el.metricLegend.style.display = "grid";
+      }}
+      const previewText = referenceTrack
+        ? ` | map preview: ${{referenceTrack.label}} (${{referenceTrack.meta.strategy ? "modeled efficiency strategy" : "geometry only"}})`
+        : "";
+      el.metaText.textContent = `${{run.label}} | ${{run.meta.sample_count}} samples | ${{run.meta.duration_s.toFixed(1)}}s | energy delta ${{run.strategy.delta_energy_pct.toFixed(2)}}%${{previewText}}`;
     }}
 
     function buildLegends() {{
@@ -1514,6 +1979,13 @@ def build_html(payload: dict[str, Any]) -> str:
       update(0);
     }}
 
+    function switchMap(trackId) {{
+      state.trackId = trackId;
+      drawFullTrack();
+      updateSummary();
+      update(state.index);
+    }}
+
     function init() {{
       DATA.runOrder.forEach(runId => {{
         const run = DATA.runs[runId];
@@ -1521,6 +1993,17 @@ def build_html(payload: dict[str, Any]) -> str:
         option.value = runId;
         option.textContent = run.label;
         el.runSelect.appendChild(option);
+      }});
+      const runMapOption = document.createElement("option");
+      runMapOption.value = "run";
+      runMapOption.textContent = "Selected run GPS";
+      el.trackSelect.appendChild(runMapOption);
+      DATA.trackOrder.forEach(trackId => {{
+        const track = DATA.tracks[trackId];
+        const option = document.createElement("option");
+        option.value = trackId;
+        option.textContent = `${{track.label}} (reference)`;
+        el.trackSelect.appendChild(option);
       }});
       metricKeys.forEach(key => {{
         const option = document.createElement("option");
@@ -1533,6 +2016,7 @@ def build_html(payload: dict[str, Any]) -> str:
       buildLegends();
       drawMapGrid();
       el.runSelect.addEventListener("change", e => switchRun(e.target.value));
+      el.trackSelect.addEventListener("change", e => switchMap(e.target.value));
       el.timeSlider.addEventListener("input", e => update(nearestIndexByTime(Number(e.target.value))));
       el.metricSelect.addEventListener("change", e => {{
         state.metric = e.target.value;
@@ -1564,7 +2048,8 @@ def main() -> int:
     for spec in run_specs:
         df, strategy_profile, strategy_report = load_single_run(spec, args)
         run_payloads.append(make_run_payload(spec, df, strategy_profile, strategy_report, args))
-    payload = make_payload(run_payloads, args)
+    reference_tracks = [load_reference_track(spec) for spec in discover_reference_tracks(args.tracks_dir)]
+    payload = make_payload(run_payloads, args, reference_tracks)
     html = build_html(payload)
     out_dir = os.path.dirname(args.output)
     if out_dir:
@@ -1574,6 +2059,11 @@ def main() -> int:
     print(f"Wrote interactive dashboard: {args.output}")
     for run in run_payloads:
         print(f"{run['label']}: {run['meta']['sample_count']} samples, {run['meta']['duration_s']}s")
+    for track in reference_tracks:
+        print(
+            f"Reference track {track['label']}: {track['meta']['sample_count']} points, "
+            f"{track['meta']['length_m']}m"
+        )
     return 0
 
 

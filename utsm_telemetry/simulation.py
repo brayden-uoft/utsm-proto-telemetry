@@ -347,11 +347,15 @@ def optimize_speed_profile(
     motor_config: dict[str, float | str] | None = None,
     start_speed_kph: float = 0.0,
     min_time_sec: float | None = None,
+    end_speed_kph: float | None = None,
+    end_speed_tolerance_kph: float = 0.5,
 ) -> pd.DataFrame:
     if time_budget_sec <= 0:
         raise ValueError("time_budget_sec must be positive.")
     if speed_min_kph <= 0 or speed_max_kph <= speed_min_kph:
         raise ValueError("speed bounds are invalid.")
+    if end_speed_tolerance_kph < 0:
+        raise ValueError("end_speed_tolerance_kph must be non-negative.")
 
     if motor_config is not None:
         speed_max_kph = min(speed_max_kph, float(motor_config.get("top_speed_kph", speed_max_kph)))
@@ -429,8 +433,19 @@ def optimize_speed_profile(
                 raise ValueError("No feasible strategy found under the speed/current constraints.")
             dp.append(state_costs)
 
+        final_states = list(dp[-1].items())
+        if end_speed_kph is not None:
+            final_states = [
+                item
+                for item in final_states
+                if abs(float(item[0][0]) - float(end_speed_kph)) <= end_speed_tolerance_kph
+            ]
+            if not final_states:
+                raise ValueError(
+                    "No feasible strategy closes the loop within the requested end-speed tolerance."
+                )
         final_key, (final_cost, _final_time, _final_current, _prev_key, _final_action) = min(
-            dp[-1].items(),
+            final_states,
             key=lambda item: item[1][0],
         )
         chosen_keys: list[tuple[float, float]] = [final_key]
@@ -529,6 +544,9 @@ def optimize_speed_profile(
         out.attrs["fuse_max_duration_sec"] = float(fuse_max_duration_sec)
         out.attrs["motor_config"] = motor_config or {}
         out.attrs["start_speed_kph"] = float(start_speed_kph)
+        out.attrs["end_speed_kph"] = float(chosen_speeds[-1])
+        out.attrs["time_budget_sec"] = float(time_budget_sec)
+        out.attrs["min_time_sec"] = float(min_time_sec) if min_time_sec is not None else None
         return out
 
     low = solve_for_lambda(0.0)
