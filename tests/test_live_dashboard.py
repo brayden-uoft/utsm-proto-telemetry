@@ -138,6 +138,26 @@ class TestLiveTelemetry(unittest.TestCase):
         self.assertAlmostEqual(result["dyno_current_A"], 2.0)
         self.assertAlmostEqual(result["dyno_voltage_V"], 24.0)
 
+    def test_dyno_test_uses_source_energy_across_sparse_lte_packets(self):
+        async def exercise():
+            manager = DynoTestManager()
+            await manager.start()
+            for timestamp_ms, source_energy_Wh in ((1_000, 12.0), (91_000, 12.5)):
+                await manager.record(
+                    TelemetryRecord.from_input(
+                        self.make_input(
+                            source_type="dyno",
+                            timestamp_ms=timestamp_ms,
+                            reported_power_W=1.0,
+                            source_energy_Wh=source_energy_Wh,
+                        )
+                    )
+                )
+            return await manager.stop()
+
+        result = asyncio.run(exercise())
+        self.assertAlmostEqual(result["output_energy_Wh"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

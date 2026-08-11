@@ -359,10 +359,13 @@ test** freezes the result and reports:
 efficiency percent = dyno output Wh / car input Wh * 100
 ```
 
-Energy uses trapezoidal integration against each ESP32 source's own
-`timestamp_ms`. A boot-ID change starts a new timing segment so a board reboot
-does not integrate across the restart. Test state is intentionally in memory;
-restarting Uvicorn clears the current test.
+Dyno output energy uses the joulemeter's locally integrated cumulative Wh
+counter, so LTE packet gaps do not discard energy generated during the run.
+Sources without a local energy counter, including the car input, use
+trapezoidal integration against their own `timestamp_ms`. A boot-ID change
+starts a new timing segment so a board reboot does not integrate across the
+restart. Test state is intentionally in memory; restarting Uvicorn clears the
+current test.
 
 ### Reaching the local server from LTE
 

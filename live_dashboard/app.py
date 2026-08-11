@@ -117,8 +117,26 @@ class EnergyAccumulator:
         self.last_boot_id: int | None = None
         self.last_timestamp_ms: int | None = None
         self.last_power_W: float | None = None
+        self.last_source_energy_Wh: float | None = None
 
     def add(self, record: TelemetryRecord) -> None:
+        if record.source_energy_Wh is not None:
+            source_energy_Wh = max(0.0, record.source_energy_Wh)
+            if self.last_source_energy_Wh is not None:
+                if self.last_boot_id == record.source_boot_id:
+                    self.energy_Wh += max(
+                        0.0, source_energy_Wh - self.last_source_energy_Wh
+                    )
+                else:
+                    # A reboot resets the source counter. Count energy produced
+                    # after the reboot before its first packet reached LTE.
+                    self.energy_Wh += source_energy_Wh
+            self.last_boot_id = record.source_boot_id
+            self.last_source_energy_Wh = source_energy_Wh
+            self.last_timestamp_ms = record.timestamp_ms
+            self.last_power_W = max(0.0, record.power_W)
+            return
+
         power_W = max(0.0, record.power_W)
         if (
             self.last_boot_id == record.source_boot_id
