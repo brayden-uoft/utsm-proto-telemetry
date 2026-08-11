@@ -247,6 +247,28 @@ The page includes:
 - an optional live map and trail when latitude/longitude arrive
 - a stale-data indicator when the car has not reported for five seconds
 
+### Importing firmware CSVs with embedded GPS
+
+New firmware logs include motor temperature, beam-break wheel speed, and GPS
+in the same raw CSV. Convert a ZIP or folder of split logger files into the
+one-GPX-plus-one-telemetry-CSV layout used by the analysis dashboard:
+
+```powershell
+python import_firmware_run.py C:\Users\brayd\Downloads\2026-08-06-01-06.zip `
+  --name front-campus
+python build_interactive_dashboard.py `
+  --run-id front-campus-2026-08-06-run-01 `
+  --run-id front-campus-2026-08-06-run-02 `
+  --run-id front-campus-2026-08-06-run-03 `
+  --output outputs\front-campus-2026-08-06-preview.html
+```
+
+The importer preserves the source timestamps, rebases the analysis timestamp,
+keeps temperature and wheel-speed channels in the telemetry CSV, and writes
+GPS coordinates/times to GPX. Recording gaps over 60 seconds become separate
+runs; short partial sessions are ignored. Each generated `run.json` stores the
+course-scaled lap count and selects the embedded-GPS `gate` splitter.
+
 The API endpoint is `POST /api/live/telemetry` and requires the
 `X-Telemetry-Key` header. Records retain the existing seven CSV fields and add
 packet identity plus optional `latitude` and `longitude` fields.

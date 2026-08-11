@@ -96,6 +96,18 @@ def read_telemetry(telemetry_path: str) -> pd.DataFrame:
         )
 
     df = df.copy()
+    # Firmware CSVs historically used ``kmph`` and a generic temperature
+    # label, while the live API uses ``kph`` and ``motor_temperature``.  Make
+    # both generations available through one canonical analysis schema.
+    aliases = {
+        "wheel_speed_kmph": "wheel_speed_kph",
+        "temperature_C": "motor_temperature_C",
+        "temperature_valid": "motor_temperature_valid",
+    }
+    for source, destination in aliases.items():
+        if destination not in df.columns and source in df.columns:
+            df[destination] = df[source]
+
     df["timestamp_ms"] = pd.to_numeric(df["timestamp_ms"], errors="coerce")
     if df["timestamp_ms"].isna().any():
         bad = df["timestamp_ms"].isna().sum()
@@ -109,6 +121,17 @@ def read_telemetry(telemetry_path: str) -> pd.DataFrame:
     df["az_x100"] = pd.to_numeric(df["az_x100"], errors="coerce")
     if "amag_x100" in df.columns:
         df["amag_x100"] = pd.to_numeric(df["amag_x100"], errors="coerce")
+    for column in ("motor_temperature_C", "wheel_speed_kph", "wheel_rpm"):
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    for valid_column, value_column in (
+        ("motor_temperature_valid", "motor_temperature_C"),
+        ("wheel_speed_valid", "wheel_speed_kph"),
+    ):
+        if valid_column in df.columns and value_column in df.columns:
+            valid = pd.to_numeric(df[valid_column], errors="coerce").fillna(0).astype(bool)
+            df[valid_column] = valid
+            df.loc[~valid, value_column] = np.nan
     return derive_acceleration_features(df)
 
 
@@ -671,8 +694,8 @@ def split_gps_into_laps(df: pd.DataFrame, laps: int, method: str = "points") -> 
                 segments.append(df.iloc[start_idx:].reset_index(drop=True))
             return segments
 
-    if method == "start":
-        raise ValueError("The 'start' split method must be handled after GPS/telemetry start alignment.")
+    if method in ("start", "gate"):
+        raise ValueError(f"The '{method}' split method must be handled after GPS/telemetry alignment.")
 
     if method == "time":
         start = df["time"].iloc[0]
@@ -1132,8 +1155,9 @@ def build_laps(
     laps:
         Expected number of racing laps.
     split_method:
-        One of ``"start"`` (start-gate detector), ``"points"``,
-        ``"time"``, or ``"line"``.
+        One of ``"start"`` (current-spike plus large-track gate detector),
+        ``"gate"`` (GPS begins at the gate, with course-scaled thresholds),
+        ``"points"``, ``"time"``, or ``"line"``.
     start_time:
         ISO 8601 string or Timestamp to force-align telemetry start.
         ``None`` aligns to the first GPS point.
@@ -1170,16 +1194,33 @@ def build_laps(
 
     telem_df = align_telemetry(telem_df, gps_df, start_time, time_offset_ms)
 
-    if split_method == "start":
-        spike_idx = find_start_spike(telem_df)
-        spike_time = telem_df.loc[spike_idx, "time"]
-        gps_start_idx = find_nearest_gps_index(gps_df, spike_time)
-        print(
-            f"Start spike at telemetry index {spike_idx}, time {spike_time}, "
-            f"matching GPS index {gps_start_idx}."
-        )
-        gps_df = gps_df.loc[gps_start_idx:].reset_index(drop=True)
-        boundaries = find_lap_boundaries_by_start_gate(gps_df, 0, laps)
+    if split_method in ("start", "gate"):
+        if split_method == "start":
+            spike_idx = find_start_spike(telem_df)
+            spike_time = telem_df.loc[spike_idx, "time"]
+            gps_start_idx = find_nearest_gps_index(gps_df, spike_time)
+            print(
+                f"Start spike at telemetry index {spike_idx}, time {spike_time}, "
+                f"matching GPS index {gps_start_idx}."
+            )
+            gps_df = gps_df.loc[gps_start_idx:].reset_index(drop=True)
+            boundaries = find_lap_boundaries_by_start_gate(gps_df, 0, laps)
+        else:
+            gps_df = gps_df.reset_index(drop=True)
+            gps_xy = add_xy(gps_df)
+            x_span = float(gps_xy["x"].max() - gps_xy["x"].min())
+            y_span = float(gps_xy["y"].max() - gps_xy["y"].min())
+            estimated_lap_m = max(200.0, x_span + y_span)
+            boundaries = find_lap_boundaries_by_start_gate(
+                gps_df,
+                0,
+                laps,
+                y_band_width=max(10.0, min(20.0, y_span * 0.10)),
+                x_window_width=max(40.0, min(80.0, x_span * 0.40)),
+                min_gap_points=5,
+                min_lap_distance_m=estimated_lap_m,
+                pre_race_max_distance_m=estimated_lap_m * 0.6,
+            )
         if len(boundaries) < laps + 1:
             print(
                 f"Warning: only found {len(boundaries) - 1} complete laps "

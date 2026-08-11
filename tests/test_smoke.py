@@ -9,6 +9,7 @@ import os
 import sys
 import unittest
 import io
+import tempfile
 
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -149,6 +150,27 @@ class TestComputeDistance(unittest.TestCase):
 
 
 class TestAlignTelemetry(unittest.TestCase):
+    def test_read_telemetry_canonicalizes_temperature_and_wheel_speed(self):
+        frame = _make_telem(2)
+        frame["temperature_C"] = [41.5, 99.0]
+        frame["temperature_valid"] = [1, 0]
+        frame["wheel_speed_kmph"] = [12.25, 88.0]
+        frame["wheel_speed_valid"] = [1, 0]
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as handle:
+            path = handle.name
+        try:
+            frame.to_csv(path, index=False)
+            from utsm_telemetry.core import read_telemetry
+
+            result = read_telemetry(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(result.loc[0, "motor_temperature_C"], 41.5)
+        self.assertEqual(result.loc[0, "wheel_speed_kph"], 12.25)
+        self.assertTrue(math.isnan(result.loc[1, "motor_temperature_C"]))
+        self.assertTrue(math.isnan(result.loc[1, "wheel_speed_kph"]))
+
     def test_creates_time_column(self):
         gps = _make_gps(10)
         telem = _make_telem(10)
@@ -665,6 +687,8 @@ class TestSimulation(unittest.TestCase):
             "y": [0.0, 0.0, 0.0, 0.0],
             "segment": [1, 1, 2, 2],
             "current_mA": [100.0, 110.0, 120.0, 130.0],
+            "motor_temperature_C": [40.0, 41.0, 42.0, 43.0],
+            "wheel_speed_kph": [17.5, 19.5, 21.5, 23.5],
             "pred_current_mA": [95.0, 105.0, 115.0, 125.0],
             "speed_kph": [18.0, 20.0, 22.0, 24.0],
             "target_speed_kph": [19.0, 19.0, 21.0, 21.0],
@@ -713,8 +737,12 @@ class TestSimulation(unittest.TestCase):
         )
         payload = make_payload([run_payload], args)
         self.assertIn("targetSpeed", payload["metrics"])
+        self.assertIn("motorTemperature", payload["metrics"])
+        self.assertIn("wheelSpeed", payload["metrics"])
         self.assertIn("afternoon", payload["runs"])
         self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["targetSpeed"], 19.0)
+        self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["motorTemperature"], 40.0)
+        self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["wheelSpeed"], 17.5)
         self.assertEqual(payload["runs"]["afternoon"]["samples"][0]["predRunEnergyJ"], 95.0)
         self.assertEqual(payload["runs"]["afternoon"]["samples"][2]["strategyAction"], "accelerate")
         self.assertGreaterEqual(len(payload["runs"]["afternoon"]["segments"]), 1)

@@ -1,0 +1,26 @@
+{
+  "label": "Front Campus 2026-08-06 Run 1",
+  "laps": 6,
+  "split_method": "gate",
+  "source": "2026-08-06-01-06.zip",
+  "source_files": [
+    "2026-08-06-00-02.csv",
+    "2026-08-06-00-05-001.csv",
+    "2026-08-06-00-05.csv",
+    "2026-08-06-00-09.csv"
+  ],
+  "source_timestamp_ms": [
+    419072,
+    1728668
+  ],
+  "distance_m": 3188.9,
+  "lap_boundary_gpx_indices": [
+    0,
+    133,
+    380,
+    664,
+    946,
+    1064,
+    1171
+  ]
+}
