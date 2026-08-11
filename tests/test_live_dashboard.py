@@ -44,10 +44,22 @@ class TestLiveTelemetry(unittest.TestCase):
         self.assertTrue(record.wheel_speed_valid)
         self.assertEqual(record.wheel_speed_kph, 23.45)
 
+    def test_optional_motor_temperature(self):
+        record = TelemetryRecord.from_input(
+            self.make_input(
+                motor_temperature_valid=True,
+                motor_temperature_C=64.25,
+            )
+        )
+        self.assertTrue(record.motor_temperature_valid)
+        self.assertEqual(record.motor_temperature_C, 64.25)
+
     def test_legacy_payload_has_unavailable_wheel_speed(self):
         record = TelemetryRecord.from_input(self.make_input())
         self.assertFalse(record.wheel_speed_valid)
         self.assertIsNone(record.wheel_speed_kph)
+        self.assertFalse(record.motor_temperature_valid)
+        self.assertIsNone(record.motor_temperature_C)
 
     def test_recent_ring_limit(self):
         async def exercise():

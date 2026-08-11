@@ -25,6 +25,8 @@ class TelemetryInput(BaseModel):
     timestamp_ms: int = Field(ge=0, le=0xFFFFFFFF)
     current_mA: int = Field(ge=-32768, le=32767)
     voltage_mV: int = Field(ge=0, le=100000)
+    motor_temperature_valid: bool = False
+    motor_temperature_C: float | None = Field(default=None, ge=-100, le=300)
     ax_x100: int = Field(ge=-32768, le=32767)
     ay_x100: int = Field(ge=-32768, le=32767)
     az_x100: int = Field(ge=-32768, le=32767)
