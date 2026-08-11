@@ -241,17 +241,18 @@ python send_live_test.py --api-key "replace-this-for-real-tests" --gps
 
 The page includes:
 
-- current, voltage, power, beam-break speed, and acceleration gauges
-- five rolling live charts
+- current, voltage, power, motor temperature, beam-break speed, and acceleration gauges
+- six rolling live charts
 - a table preserving the current telemetry CSV column names
 - an optional live map and trail when latitude/longitude arrive
 - a stale-data indicator when the car has not reported for five seconds
 
 The API endpoint is `POST /api/live/telemetry` and requires the
 `X-Telemetry-Key` header. Records retain the existing seven CSV fields and add
-packet identity, `wheel_speed_valid`, optional `wheel_speed_kph`, and optional
-`latitude` and `longitude` fields. Payloads from older firmware remain valid;
-their wheel speed appears as unavailable rather than as a false zero.
+packet identity, motor-temperature and wheel-speed values with validity flags,
+and optional `latitude` and `longitude` fields. Payloads from older firmware
+remain valid; missing motor temperature or wheel speed appears as unavailable
+rather than as a false zero.
 
 ### Reaching the local server from LTE
 
