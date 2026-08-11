@@ -334,6 +334,7 @@ The page includes:
 - a table preserving the current telemetry CSV column names
 - an optional live map and trail when latitude/longitude arrive
 - a stale-data indicator when the car has not reported for five seconds
+- a **Start dyno test** button that opens the live efficiency page
 
 The API endpoint is `POST /api/live/telemetry` and requires the
 `X-Telemetry-Key` header. Records retain the existing seven CSV fields and add
@@ -341,6 +342,27 @@ packet identity, motor-temperature and wheel-speed values with validity flags,
 and optional `latitude` and `longitude` fields. Payloads from older firmware
 remain valid; missing motor temperature or wheel speed appears as unavailable
 rather than as a false zero.
+
+### Dyno efficiency tests
+
+The same ingestion endpoint accepts explicit `source_type` values of `car` and
+`dyno`. Car power is derived from voltage and current. Dyno packets provide the
+joulemeter's reported output power. The live car page ignores dyno packets for
+its normal gauges.
+
+Click **Start dyno test** on `/live` to create an in-memory test and open
+`/dyno`. The page shows car input watts, dyno output watts, instantaneous
+efficiency, input Wh, output Wh, and whole-run efficiency. Clicking **Stop
+test** freezes the result and reports:
+
+```text
+efficiency percent = dyno output Wh / car input Wh * 100
+```
+
+Energy uses trapezoidal integration against each ESP32 source's own
+`timestamp_ms`. A boot-ID change starts a new timing segment so a board reboot
+does not integrate across the restart. Test state is intentionally in memory;
+restarting Uvicorn clears the current test.
 
 ### Reaching the local server from LTE
 

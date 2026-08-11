@@ -5,7 +5,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from live_dashboard.app import TelemetryHub, TelemetryInput, TelemetryRecord
+from live_dashboard.app import (
+    DynoTestManager,
+    TelemetryHub,
+    TelemetryInput,
+    TelemetryRecord,
+)
 
 
 class TestLiveTelemetry(unittest.TestCase):
@@ -61,6 +66,13 @@ class TestLiveTelemetry(unittest.TestCase):
         self.assertFalse(record.motor_temperature_valid)
         self.assertIsNone(record.motor_temperature_C)
 
+    def test_dyno_uses_reported_power(self):
+        record = TelemetryRecord.from_input(
+            self.make_input(source_type="dyno", reported_power_W=37.25)
+        )
+        self.assertEqual(record.source_type, "dyno")
+        self.assertAlmostEqual(record.power_W, 37.25)
+
     def test_recent_ring_limit(self):
         async def exercise():
             hub = TelemetryHub(max_records=2)
@@ -72,6 +84,39 @@ class TestLiveTelemetry(unittest.TestCase):
 
         recent = asyncio.run(exercise())
         self.assertEqual([row["sequence"] for row in recent], [1, 2])
+
+    def test_dyno_test_integrates_each_source_and_stops(self):
+        async def exercise():
+            manager = DynoTestManager()
+            await manager.start()
+            for timestamp_ms in (0, 3_600_000):
+                await manager.record(
+                    TelemetryRecord.from_input(
+                        self.make_input(
+                            source_type="car",
+                            timestamp_ms=timestamp_ms,
+                            current_mA=4_000,
+                            voltage_mV=25_000,
+                        )
+                    )
+                )
+                await manager.record(
+                    TelemetryRecord.from_input(
+                        self.make_input(
+                            device_id="test-dyno",
+                            source_type="dyno",
+                            timestamp_ms=timestamp_ms,
+                            reported_power_W=50.0,
+                        )
+                    )
+                )
+            return await manager.stop()
+
+        result = asyncio.run(exercise())
+        self.assertFalse(result["active"])
+        self.assertAlmostEqual(result["input_energy_Wh"], 100.0)
+        self.assertAlmostEqual(result["output_energy_Wh"], 50.0)
+        self.assertAlmostEqual(result["efficiency_percent"], 50.0)
 
 
 if __name__ == "__main__":
