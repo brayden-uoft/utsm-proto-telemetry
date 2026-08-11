@@ -85,6 +85,22 @@ class TestLiveTelemetry(unittest.TestCase):
         recent = asyncio.run(exercise())
         self.assertEqual([row["sequence"] for row in recent], [1, 2])
 
+    def test_latest_by_source_is_available_without_a_dyno_test(self):
+        async def exercise():
+            hub = TelemetryHub(max_records=10)
+            await hub.publish(TelemetryRecord.from_input(self.make_input(sequence=1)))
+            await hub.publish(
+                TelemetryRecord.from_input(
+                    self.make_input(source_type="dyno", sequence=2)
+                )
+            )
+            await hub.publish(TelemetryRecord.from_input(self.make_input(sequence=3)))
+            return await hub.latest_by_source()
+
+        latest = asyncio.run(exercise())
+        self.assertEqual(latest["car"]["sequence"], 3)
+        self.assertEqual(latest["dyno"]["sequence"], 2)
+
     def test_dyno_test_integrates_each_source_and_stops(self):
         async def exercise():
             manager = DynoTestManager()

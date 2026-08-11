@@ -76,20 +76,26 @@
     const number=(value,digits=1)=>value==null?'—':Number(value).toFixed(digits);
     const ageSeconds=value=>value?(Date.now()-new Date(value).getTime())/1000:Infinity;
     const ageText=value=>{if(!value)return 'Waiting for data';const age=ageSeconds(value);return age<8?`Live · ${age.toFixed(1)}s ago`:`Stale · ${age.toFixed(0)}s ago`};
-    function render(test){
+    function renderSources(test,latest={}){
+      const car=latest.car||null,dyno=latest.dyno||null;
+      const inputPower=test?.input_power_W??car?.power_W,outputPower=test?.output_power_W??dyno?.power_W;
+      const carReceivedAt=test?.car_received_at??car?.received_at,dynoReceivedAt=test?.dyno_received_at??dyno?.received_at;
+      byId('inputPower').textContent=number(inputPower,1);byId('outputPower').textContent=number(outputPower,1);byId('liveEfficiency').textContent=number(inputPower>0&&outputPower!=null?outputPower/inputPower*100:null,1);
+      byId('carVoltage').textContent=number(test?.car_voltage_V??(car?car.voltage_mV/1000:null),2);byId('carCurrent').textContent=number(test?.car_current_A??(car?car.current_mA/1000:null),2);byId('dynoVoltage').textContent=number(test?.dyno_voltage_V??(dyno?dyno.voltage_mV/1000:null),3);byId('dynoCurrent').textContent=number(test?.dyno_current_A??(dyno?dyno.current_mA/1000:null),3);
+      byId('carFreshness').textContent=ageText(carReceivedAt);byId('dynoFreshness').textContent=ageText(dynoReceivedAt);
+      byId('carDot').classList.toggle('live',ageSeconds(carReceivedAt)<8);byId('dynoDot').classList.toggle('live',ageSeconds(dynoReceivedAt)<8);
+    }
+    function render(test,latest={}){
       currentTest=test;
+      renderSources(test,latest);
       if(!test){byId('runState').textContent='No dyno test started';byId('runTime').textContent='Start a test to collect energy';byId('startButton').hidden=false;byId('stopButton').hidden=true;return}
       const active=test.active;byId('runDot').classList.toggle('live',active);byId('runState').textContent=active?`Test #${test.test_id} running`:`Test #${test.test_id} stopped`;
       const end=test.stopped_at?new Date(test.stopped_at):new Date();const seconds=Math.max(0,(end-new Date(test.started_at))/1000);byId('runTime').textContent=`Elapsed ${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`;
       byId('stopButton').hidden=!active;byId('stopButton').disabled=!active;byId('startButton').hidden=active;
-      byId('inputPower').textContent=number(test.input_power_W,1);byId('outputPower').textContent=number(test.output_power_W,1);byId('liveEfficiency').textContent=number(test.live_efficiency_percent,1);
-      byId('carVoltage').textContent=number(test.car_voltage_V,2);byId('carCurrent').textContent=number(test.car_current_A,2);byId('dynoVoltage').textContent=number(test.dyno_voltage_V,3);byId('dynoCurrent').textContent=number(test.dyno_current_A,3);
       byId('inputEnergy').textContent=number(test.input_energy_Wh,3);byId('outputEnergy').textContent=number(test.output_energy_Wh,3);byId('runEfficiency').textContent=number(test.efficiency_percent,1);
-      byId('carFreshness').textContent=ageText(test.car_received_at);byId('dynoFreshness').textContent=ageText(test.dyno_received_at);
-      byId('carDot').classList.toggle('live',ageSeconds(test.car_received_at)<8);byId('dynoDot').classList.toggle('live',ageSeconds(test.dyno_received_at)<8);
       if(!active){byId('result').classList.add('show');byId('finalEfficiency').textContent=number(test.efficiency_percent,1);byId('finalSummary').textContent=`${number(test.output_energy_Wh,3)} Wh generated from ${number(test.input_energy_Wh,3)} Wh used.`}else byId('result').classList.remove('show');
     }
-    async function load(){try{const response=await fetch('/api/dyno-tests/current');const body=await response.json();render(body.test)}catch(error){byId('runState').textContent='Dashboard connection failed'}}
+    async function load(){try{const response=await fetch('/api/dyno-tests/current');const body=await response.json();render(body.test,body.latest)}catch(error){byId('runState').textContent='Dashboard connection failed'}}
     async function start(){const button=byId('startButton');button.disabled=true;const response=await fetch('/api/dyno-tests/start',{method:'POST'});button.disabled=false;if(response.ok)render((await response.json()).test);else alert((await response.json()).detail||'Could not start test')}
     async function stop(){const button=byId('stopButton');button.disabled=true;const response=await fetch('/api/dyno-tests/stop',{method:'POST'});if(response.ok)render((await response.json()).test);else{button.disabled=false;alert((await response.json()).detail||'Could not stop test')}}
     byId('startButton').addEventListener('click',start);byId('stopButton').addEventListener('click',stop);load();setInterval(load,500);

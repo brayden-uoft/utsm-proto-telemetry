@@ -100,6 +100,16 @@ class TelemetryHub:
         async with self.lock:
             return [record.model_dump(mode="json") for record in self.records]
 
+    async def latest_by_source(self) -> dict[str, dict[str, object]]:
+        async with self.lock:
+            latest: dict[str, dict[str, object]] = {}
+            for record in reversed(self.records):
+                if record.source_type not in latest:
+                    latest[record.source_type] = record.model_dump(mode="json")
+                if len(latest) == 2:
+                    break
+            return latest
+
 
 class EnergyAccumulator:
     def __init__(self) -> None:
@@ -256,7 +266,10 @@ async def recent() -> dict[str, object]:
 
 @app.get("/api/dyno-tests/current")
 async def current_dyno_test() -> dict[str, object]:
-    return {"test": await dyno_tests.current()}
+    return {
+        "test": await dyno_tests.current(),
+        "latest": await hub.latest_by_source(),
+    }
 
 
 @app.post("/api/dyno-tests/start", status_code=201)
