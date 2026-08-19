@@ -56,6 +56,18 @@ METRICS = {
         "color": "#f97316",
     },
     "current": {"label": "Current", "unit": "mA", "field": "current", "color": "#d62728"},
+    "motorTemperature": {
+        "label": "Motor temperature",
+        "unit": "°C",
+        "field": "motorTemperature",
+        "color": "#db2777",
+    },
+    "wheelSpeed": {
+        "label": "Beam-break speed",
+        "unit": "km/h",
+        "field": "wheelSpeed",
+        "color": "#7c3aed",
+    },
     "gpsAccel": {
         "label": "GPS accel magnitude",
         "unit": "m/s^2",
@@ -101,6 +113,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--run-id",
+        action="append",
+        help=(
+            "Only build the named discovered run folder/ID. Repeat to include "
+            "multiple runs; by default every discovered run is included."
+        ),
+    )
+    parser.add_argument(
         "--tracks-dir",
         default=DEFAULT_TRACKS_DIR,
         help=(
@@ -112,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--laps", type=int, default=3)
     parser.add_argument(
         "--split-method",
-        choices=["points", "time", "line", "start"],
+        choices=["points", "time", "line", "start", "gate"],
         default="start",
     )
     parser.add_argument("--lap-times", nargs="+", metavar="ELAPSED")
@@ -197,11 +217,19 @@ def discover_runs(runs_dir: str) -> list[dict[str, str]]:
             suffix += 1
         seen_ids.add(unique_id)
 
+        manifest_path = os.path.join(run_path, "run.json")
+        manifest: dict[str, Any] = {}
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+
         runs.append({
             "id": unique_id,
-            "label": _prettify(entry),
+            "label": str(manifest.get("label", _prettify(entry))),
             "gps": os.path.join(run_path, gpx_files[0]),
             "telemetry": os.path.join(run_path, csv_files[0]),
+            "laps": int(manifest.get("laps", 0)) or None,
+            "split_method": manifest.get("split_method"),
         })
 
     return runs
@@ -219,6 +247,13 @@ def resolve_run_specs(args: argparse.Namespace) -> list[dict[str, str]]:
         raise ValueError("--gps and --telemetry must be provided together.")
 
     runs = discover_runs(args.runs_dir)
+    if args.run_id:
+        requested = set(args.run_id)
+        runs = [run for run in runs if run["id"] in requested]
+        found = {run["id"] for run in runs}
+        missing = sorted(requested - found)
+        if missing:
+            raise SystemExit(f"Requested run IDs were not found: {', '.join(missing)}")
     if not runs:
         raise SystemExit(
             f"No runs found in '{args.runs_dir}'. Add a subfolder per run, each "
@@ -415,8 +450,8 @@ def load_single_run(spec: dict[str, str], args: argparse.Namespace) -> tuple[pd.
     gps_laps, telem_laps, _ = build_laps(
         gps_df,
         telem_df,
-        laps=args.laps,
-        split_method=args.split_method,
+        laps=int(spec.get("laps") or args.laps),
+        split_method=str(spec.get("split_method") or args.split_method),
         start_time=args.start_time,
         time_offset_ms=args.time_offset_ms,
         tolerance_sec=args.tolerance_sec,
@@ -718,6 +753,10 @@ def make_run_payload(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     df = df.copy()
+    if "motor_temperature_C" not in df.columns:
+        df["motor_temperature_C"] = np.nan
+    if "wheel_speed_kph" not in df.columns:
+        df["wheel_speed_kph"] = np.nan
     if "pred_avg_current_mA" not in df.columns:
         df["pred_avg_current_mA"] = df["pred_current_mA"]
     if "pred_peak_current_mA" not in df.columns:
@@ -766,6 +805,8 @@ def make_run_payload(
             "y": finite_float(row.y, 2),
             "segment": int(row.segment),
             "current": finite_float(row.current_mA, 0),
+            "motorTemperature": finite_float(row.motor_temperature_C, 2),
+            "wheelSpeed": finite_float(row.wheel_speed_kph, 2),
             "predCurrent": finite_float(row.pred_current_mA, 0),
             "predPeakCurrent": finite_float(row.pred_peak_current_mA, 0),
             "predOnCurrent": finite_float(row.pred_on_current_mA, 0),
@@ -801,6 +842,8 @@ def make_run_payload(
             ],
             ignore_index=True,
         ),
+        "motorTemperature": pd.to_numeric(df["motor_temperature_C"], errors="coerce"),
+        "wheelSpeed": pd.to_numeric(df["wheel_speed_kph"], errors="coerce"),
         "gpsAccel": pd.to_numeric(df["gps_longitudinal_accel_abs_m_s2"], errors="coerce"),
         "imuAccel": pd.to_numeric(df["imu_forward_dynamic_m_s2"], errors="coerce"),
         "power": pd.concat(
