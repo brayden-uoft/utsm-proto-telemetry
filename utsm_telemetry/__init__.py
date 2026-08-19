@@ -54,6 +54,14 @@ from .simulation import (
     evaluate_baseline_prediction,
     build_strategy_report,
 )
+from .model_training import (
+    TrainingDataset,
+    load_training_manifest,
+    load_manifest_training_data,
+    training_provenance,
+    evaluate_model_by_run,
+    leave_one_run_out_validation,
+)
 
 __all__ = [
     "NAMESPACE",
@@ -101,4 +109,10 @@ __all__ = [
     "build_strategy_samples",
     "evaluate_baseline_prediction",
     "build_strategy_report",
+    "TrainingDataset",
+    "load_training_manifest",
+    "load_manifest_training_data",
+    "training_provenance",
+    "evaluate_model_by_run",
+    "leave_one_run_out_validation",
 ]

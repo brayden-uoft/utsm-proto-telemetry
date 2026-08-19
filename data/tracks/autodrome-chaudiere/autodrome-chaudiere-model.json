@@ -1,0 +1,91 @@
+{
+  "provenance": {
+    "name": "Front Campus 2026-08-06 transferable vehicle model",
+    "manifest": "data/models/front-campus-2026-08-06.json",
+    "run_count": 3,
+    "lap_count": 15,
+    "training_sample_count": 8115,
+    "current_calibration": {
+      "slope": 0.7949,
+      "intercept_mA": 0.0,
+      "note": "Bench slope applied to historical zero-corrected current. Source CSV values remain unchanged."
+    },
+    "sources": [
+      {
+        "run_id": "front-campus-2026-08-06-run-01",
+        "label": "Front Campus 2026-08-06 Run 1",
+        "gpx": "data/runs/front-campus-2026-08-06-run-01/front-campus-2026-08-06-run-01.gpx",
+        "telemetry": "data/runs/front-campus-2026-08-06-run-01/front-campus-2026-08-06-run-01-telemetry.csv",
+        "split_method": "gate",
+        "expected_laps": 6,
+        "loaded_laps": 6,
+        "raw_telemetry_samples": 4272,
+        "merged_training_samples": 3836,
+        "source_negative_current_samples": 3279,
+        "source_over_20a_samples": 506
+      },
+      {
+        "run_id": "front-campus-2026-08-06-run-02",
+        "label": "Front Campus 2026-08-06 Run 2",
+        "gpx": "data/runs/front-campus-2026-08-06-run-02/front-campus-2026-08-06-run-02.gpx",
+        "telemetry": "data/runs/front-campus-2026-08-06-run-02/front-campus-2026-08-06-run-02-telemetry.csv",
+        "split_method": "gate",
+        "expected_laps": 3,
+        "loaded_laps": 3,
+        "raw_telemetry_samples": 1538,
+        "merged_training_samples": 1375,
+        "source_negative_current_samples": 786,
+        "source_over_20a_samples": 129
+      },
+      {
+        "run_id": "front-campus-2026-08-06-run-03",
+        "label": "Front Campus 2026-08-06 Run 3",
+        "gpx": "data/runs/front-campus-2026-08-06-run-03/front-campus-2026-08-06-run-03.gpx",
+        "telemetry": "data/runs/front-campus-2026-08-06-run-03/front-campus-2026-08-06-run-03-telemetry.csv",
+        "split_method": "gate",
+        "expected_laps": 6,
+        "loaded_laps": 6,
+        "raw_telemetry_samples": 3508,
+        "merged_training_samples": 2904,
+        "source_negative_current_samples": 1550,
+        "source_over_20a_samples": 410
+      }
+    ]
+  },
+  "current_coeffs": [
+    90.34341307680654,
+    472.73651713104965,
+    -10.621379963950767,
+    6047.207614491555,
+    -3454.2345120696073,
+    0.0,
+    0.0,
+    0.0,
+    -11161.70737454799,
+    243.4125495281661,
+    10918.294838436992,
+    -68.72024433024941,
+    172.26089666640658
+  ],
+  "power_coeffs": [
+    2.19435097004979,
+    11.482297264596363,
+    -0.25798269794441164,
+    146.88062574838378,
+    -83.899902063659,
+    0.0,
+    0.0,
+    0.0,
+    -271.10671023022945,
+    5.912247605660822,
+    265.1944635209566,
+    -1.6691460145372288,
+    4.184044919130484
+  ],
+  "ridge": 0.001,
+  "on_current_mA": 19490.948,
+  "cruise_current_mA": 64.3869,
+  "median_voltage_v": 24.289,
+  "coast_sample_count": 439,
+  "transferable": true
+}

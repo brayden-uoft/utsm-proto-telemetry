@@ -129,29 +129,32 @@ telemetry.
 
 ## Autodrome Maximum-Efficiency Strategy
 
-Regenerate the initial Autodrome strategy from the packaged centerline and the
-existing afternoon vehicle telemetry model:
+Regenerate the Autodrome strategy from all 15 accepted Front Campus laps:
 
 ```powershell
 python generate_reference_strategy.py `
   data\tracks\autodrome-chaudiere\autodrome-chaudiere-centerline.gpx `
-  data\runs\afternoon-run\Utsm-2.gpx `
-  data\runs\afternoon-run\telemetry_20260411_122713.csv `
+  --model-manifest data\models\front-campus-2026-08-06.json `
   --output-prefix data\tracks\autodrome-chaudiere\autodrome-chaudiere `
-  --preview outputs\autodrome-chaudiere-efficiency-strategy.png `
-  --model-laps 3 `
+  --preview data\tracks\autodrome-chaudiere\autodrome-chaudiere-efficiency-strategy.png `
   --target-lap-time-sec 60 `
+  --lap-time-tolerance-pct 3 `
   --strategy-step-m 20 `
   --speed-min-kph 8 `
   --speed-max-kph 35 `
+  --speed-step-kph 0.5 `
   --start-speed-kph 24
 ```
 
-The optimizer minimizes predicted electrical energy subject to the 60-second
-maximum lap time, closed-loop start/end speed, per-segment speed-change, motor,
-and fuse constraints. A lap-time constraint is required for a useful result:
-without one, maximum efficiency degenerates to driving at the minimum allowed
-speed.
+The training manifest loads 3 runs and 15 laps, applies the documented current
+scale to a derived copy, gives every lap equal total weight, and excludes track
+position from the transferable fit. The source CSV files are never rewritten.
+The optimizer then minimizes predicted electrical energy while keeping the lap
+within 3 percent of the 60-second limit and enforcing speed-change, motor, and
+fuse constraints.
+
+See [Front Campus Physics Model](docs/FRONT_CAMPUS_PHYSICS_MODEL.md) for the
+plain-language pipeline, validation chart, limitations, and output files.
 
 To run the demo:
 
@@ -164,9 +167,7 @@ Choose **Autodrome Chaudière** from the dashboard's **Map** selector. The
 colored centerline is the target-speed curve; purple is slower and yellow is
 faster. The map readout shows the predicted lap time and energy.
 
-This is an initial transferred-model strategy, not validated Autodrome
-telemetry. The generator removes the source circuit's absolute-position model
-term before transfer, but the vehicle and surface assumptions still need to be
+This remains a transferred model, not validated Autodrome telemetry. It must be
 refit after the first real Autodrome laps.
 
 ## Reference Track Preprocessing

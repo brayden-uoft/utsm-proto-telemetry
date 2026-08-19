@@ -5,16 +5,26 @@ speed-change, motor, and fuse constraints.
 
 Reference track length: 399.3 m
 Lap-time constraint: 60.0 s
-Predicted lap time: 59.4 s
-Predicted lap energy: 6548.3 J
-Predicted energy intensity: 16400.2 J/km
-Target speed range: 20.0-29.0 km/h
-Mean segment target: 24.4 km/h
-Accelerate/hold/coast segments: 4/9/7
+Predicted lap time: 59.2 s
+Predicted lap energy: 7178.2 J
+Predicted energy intensity: 17977.7 J/km
+Target speed range: 18.5-30.5 km/h
+Mean segment target: 24.6 km/h
+Accelerate/hold/coast segments: 5/0/15
 
-Transferred model GPX: data\runs\afternoon-run\Utsm-2.gpx
-Transferred model telemetry: data\runs\afternoon-run\telemetry_20260411_122713.csv
-The recorded-circuit position coefficient was neutralized before transfer.
+Training model: Front Campus 2026-08-06 transferable vehicle model
+Training runs/laps/samples: 3/15/8115
+Absolute track position is not used by the transferred model.
 
 Important: this is a model-derived initial strategy, not measured
 Autodrome telemetry. Refit and validate it after a real driven lap.
+
+Training sources:
+- front-campus-2026-08-06-run-01: 6 laps, 3836 merged samples
+- front-campus-2026-08-06-run-02: 3 laps, 1375 merged samples
+- front-campus-2026-08-06-run-03: 6 laps, 2904 merged samples
+
+Leave-one-run-out validation:
+- front-campus-2026-08-06-run-01: Front Campus abs energy error 17.1% vs Indy 35.1% (improvement 18.0 percentage points)
+- front-campus-2026-08-06-run-02: Front Campus abs energy error 4.3% vs Indy 37.5% (improvement 33.3 percentage points)
+- front-campus-2026-08-06-run-03: Front Campus abs energy error 29.2% vs Indy 35.1% (improvement 5.9 percentage points)
