@@ -1,0 +1,20 @@
+=== Autodrome Chaudiere Transfer Strategy ===
+
+Objective: minimum predicted electrical energy subject to the lap-time,
+speed-change, motor, and fuse constraints.
+
+Reference track length: 399.3 m
+Lap-time constraint: 60.0 s
+Predicted lap time: 59.4 s
+Predicted lap energy: 6548.3 J
+Predicted energy intensity: 16400.2 J/km
+Target speed range: 20.0-29.0 km/h
+Mean segment target: 24.4 km/h
+Accelerate/hold/coast segments: 4/9/7
+
+Transferred model GPX: data\runs\afternoon-run\Utsm-2.gpx
+Transferred model telemetry: data\runs\afternoon-run\telemetry_20260411_122713.csv
+The recorded-circuit position coefficient was neutralized before transfer.
+
+Important: this is a model-derived initial strategy, not measured
+Autodrome telemetry. Refit and validate it after a real driven lap.

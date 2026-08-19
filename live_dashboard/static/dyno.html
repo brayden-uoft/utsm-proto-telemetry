@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UTSM Dyno Test</title>
+  <style>
+    :root { color-scheme:dark; --bg:#08111f; --panel:#101c2d; --line:#263a55; --muted:#91a7c2; --blue:#32a7ff; --green:#44d19d; --orange:#ffad42; --red:#ff6174; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 50% -20%,#173254 0,var(--bg) 48%); color:#f2f7ff; font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:18px 24px; border-bottom:1px solid var(--line); background:#0b1626e8; }
+    h1 { margin:0; font-size:20px; letter-spacing:.06em; }
+    .subtitle,.label,.freshness { color:var(--muted); }
+    a { color:#badfff; text-decoration:none; }
+    main { width:min(1100px,calc(100% - 28px)); margin:28px auto; }
+    .runbar { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:15px 18px; border:1px solid var(--line); border-radius:12px; background:#0e1b2d; }
+    .state { display:flex; align-items:center; gap:9px; font-weight:700; }
+    .dot { width:11px; height:11px; border-radius:50%; background:var(--red); }
+    .dot.live { background:var(--green); box-shadow:0 0 14px var(--green); }
+    .source-status { display:flex; align-items:center; gap:8px; }
+    .source-status .dot { width:9px; height:9px; flex:0 0 auto; }
+    button { border:0; border-radius:9px; padding:11px 18px; font-weight:800; cursor:pointer; }
+    #stopButton { background:var(--red); color:white; }
+    #startButton { background:var(--green); color:#04160f; }
+    button:disabled { opacity:.55; cursor:wait; }
+    .power-grid,.energy-grid { display:grid; gap:14px; margin-top:14px; }
+    .power-grid { grid-template-columns:1fr 1fr .9fr; }
+    .energy-grid { grid-template-columns:1fr 1fr 1fr; }
+    .card { min-width:0; padding:20px; border:1px solid var(--line); border-radius:14px; background:linear-gradient(145deg,#12233a,#0c1829); }
+    .label { text-transform:uppercase; letter-spacing:.11em; font-size:11px; }
+    .value { margin:8px 0 2px; font-size:clamp(34px,6vw,62px); font-weight:750; font-variant-numeric:tabular-nums; line-height:1; }
+    .unit { color:var(--muted); font-size:.42em; font-weight:500; }
+    .car .value { color:var(--blue); } .dyno .value { color:var(--orange); } .efficiency .value { color:var(--green); }
+    .energy-grid .value { font-size:clamp(28px,4vw,44px); }
+    .electrical { display:flex; gap:18px; margin:14px 0 8px; color:#d9e8f8; font-variant-numeric:tabular-nums; }
+    .electrical strong { color:#fff; font-size:18px; }
+    .equation { margin-top:14px; padding:16px 18px; color:#bfd0e3; text-align:center; border:1px dashed #38516f; border-radius:10px; }
+    #result { display:none; margin-top:14px; border-color:var(--green); }
+    #result.show { display:block; }
+    #result h2 { margin:0 0 8px; }
+    #result .final { font-size:46px; color:var(--green); font-weight:800; }
+    .warning { color:var(--orange); }
+    @media(max-width:760px){header{padding:14px}.power-grid,.energy-grid{grid-template-columns:1fr}.runbar{align-items:flex-start;flex-direction:column}.runbar button{width:100%}}
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>UTSM DYNO TEST</h1><div class="subtitle">Vehicle electrical input vs dyno electrical output</div></div>
+    <a href="/live">Back to live car</a>
+  </header>
+  <main>
+    <section class="runbar">
+      <div><div class="state"><span id="runDot" class="dot"></span><span id="runState">Loading test...</span></div><div id="runTime" class="subtitle">—</div></div>
+      <button id="startButton" hidden>Start new test</button>
+      <button id="stopButton" disabled>Stop test</button>
+    </section>
+
+    <section class="power-grid">
+      <article class="card car"><div class="label">Car input power</div><div class="value"><span id="inputPower">—</span> <span class="unit">W</span></div><div class="electrical"><span><strong id="carVoltage">—</strong> V</span><span><strong id="carCurrent">—</strong> A</span></div><div class="source-status"><span id="carDot" class="dot"></span><span id="carFreshness" class="freshness">Waiting for car</span></div></article>
+      <article class="card dyno"><div class="label">Dyno output power</div><div class="value"><span id="outputPower">—</span> <span class="unit">W</span></div><div class="electrical"><span><strong id="dynoVoltage">—</strong> V</span><span><strong id="dynoCurrent">—</strong> A</span></div><div class="source-status"><span id="dynoDot" class="dot"></span><span id="dynoFreshness" class="freshness">Waiting for dyno</span></div></article>
+      <article class="card efficiency"><div class="label">Live efficiency</div><div class="value"><span id="liveEfficiency">—</span> <span class="unit">%</span></div><div class="freshness">output W ÷ input W</div></article>
+    </section>
+
+    <section class="energy-grid">
+      <article class="card car"><div class="label">Energy used</div><div class="value"><span id="inputEnergy">0.000</span> <span class="unit">Wh</span></div></article>
+      <article class="card dyno"><div class="label">Energy generated</div><div class="value"><span id="outputEnergy">0.000</span> <span class="unit">Wh</span></div></article>
+      <article class="card efficiency"><div class="label">Run efficiency</div><div class="value"><span id="runEfficiency">—</span> <span class="unit">%</span></div></article>
+    </section>
+
+    <div class="equation">Run efficiency = dyno output Wh ÷ car input Wh × 100</div>
+    <section id="result" class="card"><h2>Dyno test complete</h2><div class="final"><span id="finalEfficiency">—</span>%</div><div id="finalSummary" class="subtitle"></div></section>
+  </main>
+  <script>
+    const byId=id=>document.getElementById(id);
+    let currentTest=null;
+    const number=(value,digits=1)=>value==null?'—':Number(value).toFixed(digits);
+    const ageSeconds=value=>value?(Date.now()-new Date(value).getTime())/1000:Infinity;
+    const ageText=value=>{if(!value)return 'Waiting for data';const age=ageSeconds(value);return age<8?`Live · ${age.toFixed(1)}s ago`:`Stale · ${age.toFixed(0)}s ago`};
+    function renderSources(test,latest={}){
+      const car=latest.car||null,dyno=latest.dyno||null;
+      const inputPower=test?.input_power_W??car?.power_W,outputPower=test?.output_power_W??dyno?.power_W;
+      const carReceivedAt=test?.car_received_at??car?.received_at,dynoReceivedAt=test?.dyno_received_at??dyno?.received_at;
+      byId('inputPower').textContent=number(inputPower,1);byId('outputPower').textContent=number(outputPower,1);byId('liveEfficiency').textContent=number(inputPower>0&&outputPower!=null?outputPower/inputPower*100:null,1);
+      byId('carVoltage').textContent=number(test?.car_voltage_V??(car?car.voltage_mV/1000:null),2);byId('carCurrent').textContent=number(test?.car_current_A??(car?car.current_mA/1000:null),2);byId('dynoVoltage').textContent=number(test?.dyno_voltage_V??(dyno?dyno.voltage_mV/1000:null),3);byId('dynoCurrent').textContent=number(test?.dyno_current_A??(dyno?dyno.current_mA/1000:null),3);
+      byId('carFreshness').textContent=ageText(carReceivedAt);byId('dynoFreshness').textContent=ageText(dynoReceivedAt);
+      byId('carDot').classList.toggle('live',ageSeconds(carReceivedAt)<8);byId('dynoDot').classList.toggle('live',ageSeconds(dynoReceivedAt)<8);
+    }
+    function render(test,latest={}){
+      currentTest=test;
+      renderSources(test,latest);
+      if(!test){byId('runState').textContent='No dyno test started';byId('runTime').textContent='Start a test to collect energy';byId('startButton').hidden=false;byId('stopButton').hidden=true;return}
+      const active=test.active;byId('runDot').classList.toggle('live',active);byId('runState').textContent=active?`Test #${test.test_id} running`:`Test #${test.test_id} stopped`;
+      const end=test.stopped_at?new Date(test.stopped_at):new Date();const seconds=Math.max(0,(end-new Date(test.started_at))/1000);byId('runTime').textContent=`Elapsed ${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`;
+      byId('stopButton').hidden=!active;byId('stopButton').disabled=!active;byId('startButton').hidden=active;
+      byId('inputEnergy').textContent=number(test.input_energy_Wh,3);byId('outputEnergy').textContent=number(test.output_energy_Wh,3);byId('runEfficiency').textContent=number(test.efficiency_percent,1);
+      if(!active){byId('result').classList.add('show');byId('finalEfficiency').textContent=number(test.efficiency_percent,1);byId('finalSummary').textContent=`${number(test.output_energy_Wh,3)} Wh generated from ${number(test.input_energy_Wh,3)} Wh used.`}else byId('result').classList.remove('show');
+    }
+    async function load(){try{const response=await fetch('/api/dyno-tests/current');const body=await response.json();render(body.test,body.latest)}catch(error){byId('runState').textContent='Dashboard connection failed'}}
+    async function start(){const button=byId('startButton');button.disabled=true;const response=await fetch('/api/dyno-tests/start',{method:'POST'});button.disabled=false;if(response.ok)render((await response.json()).test);else alert((await response.json()).detail||'Could not start test')}
+    async function stop(){const button=byId('stopButton');button.disabled=true;const response=await fetch('/api/dyno-tests/stop',{method:'POST'});if(response.ok)render((await response.json()).test);else{button.disabled=false;alert((await response.json()).detail||'Could not stop test')}}
+    byId('startButton').addEventListener('click',start);byId('stopButton').addEventListener('click',stop);load();setInterval(load,500);
+  </script>
+</body>
+</html>

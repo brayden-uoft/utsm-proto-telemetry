@@ -59,6 +59,14 @@ Currently packaged:
 - `data\runs\morning-run\` - `Utsm.gpx` + `telemetry_20260411_112302.csv`
 - `data\runs\afternoon-run\` - `Utsm-2.gpx` + `telemetry_20260411_122713.csv`
 
+Reference tracks without telemetry live separately under `data\tracks\`. The
+dashboard discovers one `*-centerline.gpx` file per track folder and adds it to
+the **Map** selector without treating it as a recorded run. Currently packaged:
+
+- `data\tracks\autodrome-chaudiere\` - a smoothed 399.3 m centerline and
+  model-derived efficiency strategy for Autodrome Chaudière near Québec City,
+  resampled to 80 points at approximately 5 m spacing
+
 Use `--laps 3 --split-method start` as the standard replay/strategy path. The fourth recorded pass is currently treated as unreliable for strategy work, so the dashboard and simulator default to the first three clean laps.
 
 To point the dashboard at a different folder of runs, pass `--runs-dir`. To
@@ -83,6 +91,7 @@ python build_interactive_dashboard.py --laps 3 --strategy-step-m 50 --display-re
 Open `outputs\telemetry_strategy_dashboard.html` in a browser. It is a self-contained HTML file with:
 
 - run switcher for the morning and afternoon datasets
+- map switcher for recorded-run GPS or packaged geometry-only reference tracks
 - one manual time slider per selected run
 - play/pause replay
 - full-course gray reference trace
@@ -111,6 +120,85 @@ Acceleration is split into two separate channels:
 - `MPU dynamic acceleration`: MPU-6050 axis data scaled as milli-g, bias/gravity corrected with a rolling median, and kept as a diagnostic vibration/response channel.
 
 The dashboard payload also includes MPU axis/sign diagnostic correlations for `ax`, `-ax`, `ay`, `-ay`, `az`, and `-az`.
+
+When a reference track is selected, the charts continue to describe the
+selected recorded run. A reference track can also include a separately
+generated model strategy: the Autodrome map colors its centerline by target
+speed and clearly labels the result as model-derived rather than measured
+telemetry.
+
+## Autodrome Maximum-Efficiency Strategy
+
+Regenerate the initial Autodrome strategy from the packaged centerline and the
+existing afternoon vehicle telemetry model:
+
+```powershell
+python generate_reference_strategy.py `
+  data\tracks\autodrome-chaudiere\autodrome-chaudiere-centerline.gpx `
+  data\runs\afternoon-run\Utsm-2.gpx `
+  data\runs\afternoon-run\telemetry_20260411_122713.csv `
+  --output-prefix data\tracks\autodrome-chaudiere\autodrome-chaudiere `
+  --preview outputs\autodrome-chaudiere-efficiency-strategy.png `
+  --model-laps 3 `
+  --target-lap-time-sec 60 `
+  --strategy-step-m 20 `
+  --speed-min-kph 8 `
+  --speed-max-kph 35 `
+  --start-speed-kph 24
+```
+
+The optimizer minimizes predicted electrical energy subject to the 60-second
+maximum lap time, closed-loop start/end speed, per-segment speed-change, motor,
+and fuse constraints. A lap-time constraint is required for a useful result:
+without one, maximum efficiency degenerates to driving at the minimum allowed
+speed.
+
+To run the demo:
+
+```powershell
+python build_interactive_dashboard.py --laps 3 --output outputs\telemetry_strategy_dashboard.html
+Start-Process outputs\telemetry_strategy_dashboard.html
+```
+
+Choose **Autodrome Chaudière** from the dashboard's **Map** selector. The
+colored centerline is the target-speed curve; purple is slower and yellow is
+faster. The map readout shows the predicted lap time and energy.
+
+This is an initial transferred-model strategy, not validated Autodrome
+telemetry. The generator removes the source circuit's absolute-position model
+term before transfer, but the vehicle and surface assumptions still need to be
+refit after the first real Autodrome laps.
+
+## Reference Track Preprocessing
+
+The original Autodrome Chaudière Google Earth export contains two coarse
+closed paths named `Outer Ring` and `Inner Ring`, not a drivable centerline.
+Regenerate the packaged track and a visual audit image with:
+
+```powershell
+python preprocess_track.py `
+  data\tracks\autodrome-chaudiere\google-earth-boundaries.gpx `
+  data\tracks\autodrome-chaudiere\autodrome-chaudiere-centerline.gpx `
+  --preview outputs\autodrome-chaudiere-preprocessing.png `
+  --spacing-m 5 `
+  --smooth-window-m 12
+```
+
+The preprocessing stages are:
+
+1. Parse the inner and outer GPX tracks and remove duplicate closing points.
+2. Project latitude/longitude into a local metre coordinate system.
+3. Normalize ring direction and cyclically align their start phases.
+4. Resample both boundaries uniformly and average paired points.
+5. Apply a periodic Gaussian smoother so the closed seam remains continuous.
+6. Resample the smoothed centerline at fixed spacing and export an untimed,
+   geometry-only GPX.
+
+For the supplied source this produces a 399.3 m closed centerline from a
+450.6 m outer boundary and 357.2 m inner boundary. The result closely matches
+the published 0.4 km track length, but it remains satellite-traced geometry;
+replace or calibrate it against a real driven GPS lap before using metre-level
+driver guidance.
 
 The total-energy chart is cumulative run joules versus elapsed time. It spans the whole run and does not reset at lap boundaries.
 
@@ -241,11 +329,12 @@ python send_live_test.py --api-key "replace-this-for-real-tests" --gps
 
 The page includes:
 
-- current, voltage, power, and acceleration gauges
-- four rolling live charts
+- current, voltage, power, motor temperature, beam-break speed, and acceleration gauges
+- six rolling live charts
 - a table preserving the current telemetry CSV column names
 - an optional live map and trail when latitude/longitude arrive
 - a stale-data indicator when the car has not reported for five seconds
+- a **Start dyno test** button that opens the live efficiency page
 
 ### Importing firmware CSVs with embedded GPS
 
@@ -271,7 +360,34 @@ course-scaled lap count and selects the embedded-GPS `gate` splitter.
 
 The API endpoint is `POST /api/live/telemetry` and requires the
 `X-Telemetry-Key` header. Records retain the existing seven CSV fields and add
-packet identity plus optional `latitude` and `longitude` fields.
+packet identity, motor-temperature and wheel-speed values with validity flags,
+and optional `latitude` and `longitude` fields. Payloads from older firmware
+remain valid; missing motor temperature or wheel speed appears as unavailable
+rather than as a false zero.
+
+### Dyno efficiency tests
+
+The same ingestion endpoint accepts explicit `source_type` values of `car` and
+`dyno`. Car power is derived from voltage and current. Dyno packets provide the
+joulemeter's reported output power. The live car page ignores dyno packets for
+its normal gauges.
+
+Click **Start dyno test** on `/live` to create an in-memory test and open
+`/dyno`. The page shows car input watts, dyno output watts, instantaneous
+efficiency, input Wh, output Wh, and whole-run efficiency. Clicking **Stop
+test** freezes the result and reports:
+
+```text
+efficiency percent = dyno output Wh / car input Wh * 100
+```
+
+Dyno output energy uses the joulemeter's locally integrated cumulative Wh
+counter, so LTE packet gaps do not discard energy generated during the run.
+Sources without a local energy counter, including the car input, use
+trapezoidal integration against their own `timestamp_ms`. A boot-ID change
+starts a new timing segment so a board reboot does not integrate across the
+restart. Test state is intentionally in memory; restarting Uvicorn clears the
+current test.
 
 ### Reaching the local server from LTE
 
