@@ -114,7 +114,12 @@ def read_telemetry(telemetry_path: str) -> pd.DataFrame:
         print(f"WARNING: Dropping {bad} telemetry rows with invalid timestamp_ms values.")
         df = df.dropna(subset=["timestamp_ms"]).reset_index(drop=True)
 
-    df["current_mA"] = pd.to_numeric(df["current_mA"], errors="coerce").abs()
+    source_current = pd.to_numeric(df["current_mA"], errors="coerce")
+    # Keep the signed source measurement available for audits. Historical
+    # analysis treats current as a magnitude, but model-specific calibration
+    # must not destroy the value that was actually written by firmware.
+    df["source_current_mA"] = source_current
+    df["current_mA"] = source_current.abs()
     df["voltage_mV"] = pd.to_numeric(df["voltage_mV"], errors="coerce")
     df["ax_x100"] = pd.to_numeric(df["ax_x100"], errors="coerce")
     df["ay_x100"] = pd.to_numeric(df["ay_x100"], errors="coerce")

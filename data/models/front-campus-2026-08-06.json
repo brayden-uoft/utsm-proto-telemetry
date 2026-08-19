@@ -1,0 +1,27 @@
+{
+  "name": "Front Campus 2026-08-06 transferable vehicle model",
+  "runs_dir": "../runs",
+  "merge_tolerance_sec": 1.5,
+  "current_calibration": {
+    "slope": 0.7949,
+    "intercept_mA": 0.0,
+    "note": "Bench slope applied to historical zero-corrected current. Source CSV values remain unchanged."
+  },
+  "runs": [
+    {
+      "id": "front-campus-2026-08-06-run-01",
+      "laps": 6,
+      "split_method": "gate"
+    },
+    {
+      "id": "front-campus-2026-08-06-run-02",
+      "laps": 3,
+      "split_method": "gate"
+    },
+    {
+      "id": "front-campus-2026-08-06-run-03",
+      "laps": 6,
+      "split_method": "gate"
+    }
+  ]
+}

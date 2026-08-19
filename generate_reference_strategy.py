@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -21,10 +22,13 @@ from utsm_telemetry import (
     build_motor_config,
     derive_motion_energy,
     fit_empirical_energy_model,
+    leave_one_run_out_validation,
+    load_manifest_training_data,
     merge_by_time,
     optimize_speed_profile,
     read_gpx,
     read_telemetry,
+    training_provenance,
 )
 
 
@@ -41,16 +45,26 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("reference_gpx", help="Untimed reference-track centerline GPX")
-    parser.add_argument("model_gpx", help="Recorded GPX used to fit the vehicle model")
-    parser.add_argument("model_telemetry", help="Recorded telemetry CSV used to fit the vehicle model")
+    parser.add_argument("model_gpx", nargs="?", help="Legacy recorded GPX used to fit one vehicle model")
+    parser.add_argument("model_telemetry", nargs="?", help="Legacy recorded telemetry CSV used to fit one vehicle model")
+    parser.add_argument(
+        "--model-manifest",
+        help="JSON manifest listing all recorded runs used for transferable model training",
+    )
     parser.add_argument("--output-prefix", default=os.path.join("outputs", "reference-efficiency"))
     parser.add_argument("--preview", help="Optional PNG with the map and speed-vs-distance curve")
     parser.add_argument("--model-laps", type=int, default=3)
     parser.add_argument("--target-lap-time-sec", type=float, default=60.0)
+    parser.add_argument(
+        "--lap-time-tolerance-pct",
+        type=float,
+        default=3.0,
+        help="Require the optimized lap to remain within this percent below the time limit",
+    )
     parser.add_argument("--strategy-step-m", type=float, default=20.0)
     parser.add_argument("--speed-min-kph", type=float, default=8.0)
     parser.add_argument("--speed-max-kph", type=float, default=35.0)
-    parser.add_argument("--speed-step-kph", type=float, default=1.0)
+    parser.add_argument("--speed-step-kph", type=float, default=0.5)
     parser.add_argument("--max-delta-kph-per-segment", type=float, default=5.0)
     parser.add_argument("--start-speed-kph", type=float)
     parser.add_argument("--closed-loop-tolerance-kph", type=float, default=0.5)
@@ -250,15 +264,14 @@ def build_report(
     profile: pd.DataFrame,
     *,
     target_lap_time_sec: float,
-    model_gpx: str,
-    model_telemetry: str,
+    provenance: dict[str, object],
+    validation: pd.DataFrame | None = None,
 ) -> str:
     length_m = float(geometry.attrs["track_length_m"])
     predicted_time = float(profile["segment_time_s"].sum())
     predicted_energy = float(profile["pred_energy_j"].sum())
     speeds = pd.to_numeric(profile["target_speed_kph"], errors="coerce")
-    return "\n".join(
-        [
+    lines = [
             "=== Autodrome Chaudiere Transfer Strategy ===",
             "",
             "Objective: minimum predicted electrical energy subject to the lap-time,",
@@ -276,14 +289,91 @@ def build_report(
             f"{int((profile['action'] == 'hold').sum())}/"
             f"{int((profile['action'] == 'coast').sum())}",
             "",
-            f"Transferred model GPX: {model_gpx}",
-            f"Transferred model telemetry: {model_telemetry}",
-            "The recorded-circuit position coefficient was neutralized before transfer.",
+            f"Training model: {provenance.get('name', 'legacy single-run model')}",
+            f"Training runs/laps/samples: {provenance.get('run_count', 1)}/"
+            f"{provenance.get('lap_count', 0)}/{provenance.get('training_sample_count', 0)}",
+            "Absolute track position is not used by the transferred model.",
             "",
             "Important: this is a model-derived initial strategy, not measured",
             "Autodrome telemetry. Refit and validate it after a real driven lap.",
         ]
+    sources = provenance.get("sources", [])
+    if isinstance(sources, list) and sources:
+        lines.extend(["", "Training sources:"])
+        for source in sources:
+            if isinstance(source, dict):
+                lines.append(
+                    f"- {source.get('run_id')}: {source.get('loaded_laps')} laps, "
+                    f"{source.get('merged_training_samples')} merged samples"
+                )
+    if validation is not None and not validation.empty:
+        lines.extend(["", "Leave-one-run-out validation:"])
+        for row in validation.itertuples(index=False):
+            improvement = getattr(row, "absolute_energy_error_improvement_pct_points", float("nan"))
+            lines.append(
+                f"- {row.held_out_run_id}: Front Campus abs energy error "
+                f"{row.front_campus_absolute_energy_error_pct:.1f}% vs Indy "
+                f"{row.indy_absolute_energy_error_pct:.1f}% "
+                f"(improvement {improvement:.1f} percentage points)"
+            )
+    return "\n".join(lines)
+
+
+def write_validation_preview(path: str | os.PathLike[str], validation: pd.DataFrame) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    labels = [str(value).replace("front-campus-2026-08-06-", "") for value in validation["held_out_run_id"]]
+    positions = np.arange(len(labels), dtype=float)
+    width = 0.36
+    fig, (energy_ax, current_ax) = plt.subplots(1, 2, figsize=(12, 5.5))
+    energy_ax.bar(
+        positions - width / 2,
+        validation["indy_absolute_energy_error_pct"],
+        width,
+        label="Old Indy-only model",
+        color="#94a3b8",
     )
+    energy_ax.bar(
+        positions + width / 2,
+        validation["front_campus_absolute_energy_error_pct"],
+        width,
+        label="Front Campus pooled model",
+        color="#2563eb",
+    )
+    energy_ax.set_title("Held-out lap-energy error")
+    energy_ax.set_ylabel("Absolute error (%)")
+    energy_ax.set_xticks(positions, labels)
+    energy_ax.grid(axis="y", linestyle="--", alpha=0.25)
+    energy_ax.legend()
+
+    current_ax.bar(
+        positions - width / 2,
+        validation["indy_current_mae_mA"] / 1000.0,
+        width,
+        label="Old Indy-only model",
+        color="#94a3b8",
+    )
+    current_ax.bar(
+        positions + width / 2,
+        validation["front_campus_current_mae_mA"] / 1000.0,
+        width,
+        label="Front Campus pooled model",
+        color="#2563eb",
+    )
+    current_ax.set_title("Held-out average-current error")
+    current_ax.set_ylabel("MAE (A)")
+    current_ax.set_xticks(positions, labels)
+    current_ax.grid(axis="y", linestyle="--", alpha=0.25)
+    current_ax.legend()
+    fig.suptitle("Front Campus model validation by held-out run")
+    fig.tight_layout()
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=170)
+    plt.close(fig)
 
 
 def write_preview(
@@ -346,12 +436,62 @@ def main() -> int:
     args = parse_args()
     if args.target_lap_time_sec <= 0:
         raise ValueError("--target-lap-time-sec must be positive.")
+    if args.lap_time_tolerance_pct < 0 or args.lap_time_tolerance_pct >= 100:
+        raise ValueError("--lap-time-tolerance-pct must be between 0 and 100.")
+    if args.model_manifest:
+        if args.model_gpx or args.model_telemetry:
+            raise ValueError("Use --model-manifest or the legacy GPX/telemetry pair, not both.")
+    elif not args.model_gpx or not args.model_telemetry:
+        raise ValueError("Provide --model-manifest or both legacy model GPX and telemetry paths.")
     geometry = read_reference_geometry(args.reference_gpx)
     nominal_speed = float(geometry.attrs["track_length_m"] / args.target_lap_time_sec * 3.6)
     start_speed = args.start_speed_kph if args.start_speed_kph is not None else round(nominal_speed)
     segments = build_reference_segments(geometry, args.strategy_step_m, nominal_speed)
-    training = load_model_training_data(args.model_gpx, args.model_telemetry, laps=args.model_laps)
-    model = make_transferable_model(fit_empirical_energy_model(training))
+    validation: pd.DataFrame | None = None
+    if args.model_manifest:
+        dataset = load_manifest_training_data(args.model_manifest)
+        training = dataset.frame
+        provenance = training_provenance(dataset)
+        model = fit_empirical_energy_model(
+            training,
+            sample_weight_column="sample_weight",
+            transferable=True,
+        )
+        baseline_gpx = os.path.join("data", "runs", "afternoon-run", "Utsm-2.gpx")
+        baseline_telemetry = os.path.join(
+            "data", "runs", "afternoon-run", "telemetry_20260411_122713.csv"
+        )
+        baseline_training = load_model_training_data(
+            baseline_gpx, baseline_telemetry, laps=3
+        )
+        baseline_model = make_transferable_model(
+            fit_empirical_energy_model(baseline_training)
+        )
+        validation = leave_one_run_out_validation(
+            dataset,
+            baseline_model=baseline_model,
+            strategy_step_m=50.0,
+        )
+    else:
+        training = load_model_training_data(
+            args.model_gpx, args.model_telemetry, laps=args.model_laps
+        )
+        model = make_transferable_model(fit_empirical_energy_model(training))
+        provenance = {
+            "name": "Legacy single-run transferable model",
+            "run_count": 1,
+            "lap_count": args.model_laps,
+            "training_sample_count": len(training),
+            "sources": [
+                {
+                    "run_id": "legacy-model-run",
+                    "loaded_laps": args.model_laps,
+                    "merged_training_samples": len(training),
+                    "gpx": args.model_gpx,
+                    "telemetry": args.model_telemetry,
+                }
+            ],
+        }
     motor = build_motor_config(
         wheel_diameter_m=args.wheel_diameter_m,
         vehicle_mass_kg=args.vehicle_mass_kg,
@@ -365,6 +505,7 @@ def main() -> int:
         segments,
         model,
         time_budget_sec=args.target_lap_time_sec,
+        min_time_sec=args.target_lap_time_sec * (1.0 - args.lap_time_tolerance_pct / 100.0),
         speed_min_kph=args.speed_min_kph,
         speed_max_kph=args.speed_max_kph,
         max_delta_kph_per_segment=args.max_delta_kph_per_segment,
@@ -383,8 +524,8 @@ def main() -> int:
         geometry,
         profile,
         target_lap_time_sec=args.target_lap_time_sec,
-        model_gpx=args.model_gpx,
-        model_telemetry=args.model_telemetry,
+        provenance=provenance,
+        validation=validation,
     )
 
     prefix = Path(args.output_prefix)
@@ -392,9 +533,27 @@ def main() -> int:
     segments_path = Path(f"{prefix}-strategy-segments.csv")
     samples_path = Path(f"{prefix}-efficiency-strategy.csv")
     report_path = Path(f"{prefix}-strategy-report.txt")
+    model_path = Path(f"{prefix}-model.json")
+    validation_path = Path(f"{prefix}-model-validation.csv")
+    validation_preview_path = Path(f"{prefix}-model-validation.png")
     profile.to_csv(segments_path, index=False)
     samples.to_csv(samples_path, index=False)
     report_path.write_text(report + "\n", encoding="utf-8")
+    model_payload = {
+        "provenance": provenance,
+        "current_coeffs": np.asarray(model["current_coeffs"], dtype=float).tolist(),
+        "power_coeffs": np.asarray(model["power_coeffs"], dtype=float).tolist(),
+        "ridge": float(model["ridge"]),
+        "on_current_mA": float(model["on_current_mA"]),
+        "cruise_current_mA": float(model["cruise_current_mA"]),
+        "median_voltage_v": float(model["median_voltage_v"]),
+        "coast_sample_count": int(model["coast_sample_count"]),
+        "transferable": bool(model.get("transferable", True)),
+    }
+    model_path.write_text(json.dumps(model_payload, indent=2) + "\n", encoding="utf-8")
+    if validation is not None:
+        validation.to_csv(validation_path, index=False)
+        write_validation_preview(validation_preview_path, validation)
     if args.preview:
         write_preview(args.preview, samples, profile)
 
@@ -403,6 +562,10 @@ def main() -> int:
     print(f"Wrote segments: {segments_path}")
     print(f"Wrote mapped curve: {samples_path}")
     print(f"Wrote report: {report_path}")
+    print(f"Wrote model: {model_path}")
+    if validation is not None:
+        print(f"Wrote validation: {validation_path}")
+        print(f"Wrote validation preview: {validation_preview_path}")
     if args.preview:
         print(f"Wrote preview: {args.preview}")
     return 0

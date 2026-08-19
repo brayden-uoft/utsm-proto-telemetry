@@ -5,6 +5,7 @@ Or simply: python tests/test_smoke.py
 """
 
 import math
+import json
 import os
 import sys
 import unittest
@@ -29,6 +30,7 @@ from generate_reference_strategy import (
     build_reference_segments,
     make_transferable_model,
     periodic_curvature,
+    read_reference_geometry,
 )
 from utsm_telemetry.core import (
     add_xy,
@@ -61,6 +63,10 @@ from utsm_telemetry.strategy_export import (
     build_firmware_strategy_table,
     nearest_strategy_recommendation,
     render_strategy_header,
+)
+from utsm_telemetry.model_training import (
+    load_manifest_training_data,
+    training_provenance,
 )
 
 
@@ -909,6 +915,95 @@ class TestSimulation(unittest.TestCase):
             longest = max(longest, run)
         self.assertLessEqual(longest, 1.0)
         self.assertTrue(set(profile["action"]).issubset({"accelerate", "hold", "coast"}))
+
+
+class TestFrontCampusPhysicsModel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cls.dataset = load_manifest_training_data(
+            os.path.join(root, "data", "models", "front-campus-2026-08-06.json")
+        )
+
+    def test_manifest_loads_all_runs_laps_and_samples(self):
+        provenance = training_provenance(self.dataset)
+        self.assertEqual(provenance["run_count"], 3)
+        self.assertEqual(provenance["lap_count"], 15)
+        self.assertEqual(provenance["training_sample_count"], 8115)
+        self.assertEqual(
+            [source["merged_training_samples"] for source in provenance["sources"]],
+            [3836, 1375, 2904],
+        )
+
+    def test_calibration_preserves_source_and_equalizes_lap_weight(self):
+        frame = self.dataset.frame
+        self.assertTrue((frame["source_current_mA"] < 0).any())
+        self.assertTrue((frame["current_mA"] >= 0).all())
+        self.assertTrue((frame["uncalibrated_current_mA"] >= frame["current_mA"]).all())
+        lap_weights = frame.groupby(["run_id", "lap_id"])["sample_weight"].sum()
+        self.assertAlmostEqual(float(lap_weights.max()), float(lap_weights.min()), places=8)
+
+    def test_transferable_fit_is_deterministic_and_has_no_position_term(self):
+        first = fit_empirical_energy_model(
+            self.dataset.frame,
+            sample_weight_column="sample_weight",
+            transferable=True,
+        )
+        second = fit_empirical_energy_model(
+            self.dataset.frame,
+            sample_weight_column="sample_weight",
+            transferable=True,
+        )
+        np.testing.assert_allclose(first["current_coeffs"], second["current_coeffs"])
+        np.testing.assert_allclose(first["power_coeffs"], second["power_coeffs"])
+        self.assertEqual(float(first["current_coeffs"][7]), 0.0)
+        self.assertEqual(float(first["power_coeffs"][7]), 0.0)
+        self.assertAlmostEqual(first["training_weight_sum"], 8115.0, places=6)
+
+    def test_packaged_validation_improves_energy_error_for_every_run(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        validation = pd.read_csv(
+            os.path.join(
+                root,
+                "data",
+                "tracks",
+                "autodrome-chaudiere",
+                "autodrome-chaudiere-model-validation.csv",
+            )
+        )
+        self.assertEqual(len(validation), 3)
+        self.assertTrue((validation["absolute_energy_error_improvement_pct_points"] > 0).all())
+
+    def test_packaged_strategy_respects_lap_time_window(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        track_dir = os.path.join(root, "data", "tracks", "autodrome-chaudiere")
+        geometry = read_reference_geometry(
+            os.path.join(track_dir, "autodrome-chaudiere-centerline.gpx")
+        )
+        segments = build_reference_segments(
+            geometry,
+            strategy_step_m=20.0,
+            nominal_speed_kph=float(geometry.attrs["track_length_m"] / 60.0 * 3.6),
+        )
+        with open(os.path.join(track_dir, "autodrome-chaudiere-model.json"), encoding="utf-8") as handle:
+            model = json.load(handle)
+        profile = optimize_speed_profile(
+            segments,
+            model,
+            time_budget_sec=60.0,
+            min_time_sec=58.2,
+            speed_min_kph=8.0,
+            speed_max_kph=35.0,
+            max_delta_kph_per_segment=5.0,
+            speed_step_kph=0.5,
+            motor_config=build_motor_config(),
+            start_speed_kph=24.0,
+            end_speed_kph=24.0,
+            end_speed_tolerance_kph=0.5,
+        )
+        total_time = float(profile["segment_time_s"].sum())
+        self.assertGreaterEqual(total_time, 58.2)
+        self.assertLessEqual(total_time, 60.0)
 
 
 class TestFirmwareStrategyExport(unittest.TestCase):

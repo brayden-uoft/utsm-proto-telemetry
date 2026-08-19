@@ -171,7 +171,13 @@ def build_strategy_segments_by_distance(df: pd.DataFrame, strategy_step_m: float
     return build_strategy_segments(df, segments=segments)
 
 
-def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[str, object]:
+def fit_empirical_energy_model(
+    df: pd.DataFrame,
+    ridge: float = 1e-3,
+    *,
+    sample_weight_column: str | None = None,
+    transferable: bool = False,
+) -> dict[str, object]:
     df = build_full_run_distance(df)
     fit = pd.DataFrame({
         "speed_kph": pd.to_numeric(df.get("speed_kph"), errors="coerce"),
@@ -180,7 +186,24 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
         "current_mA": pd.to_numeric(df.get("current_mA"), errors="coerce"),
         "power_w": pd.to_numeric(df.get("power_w"), errors="coerce"),
         "run_cumdist_m": pd.to_numeric(df.get("run_cumdist_m"), errors="coerce"),
-    }).dropna()
+        "model_position_frac": pd.to_numeric(df.get("model_position_frac"), errors="coerce"),
+        "sample_weight": (
+            pd.to_numeric(df.get(sample_weight_column), errors="coerce")
+            if sample_weight_column
+            else 1.0
+        ),
+    })
+    fit = fit.dropna(
+        subset=[
+            "speed_kph",
+            "grade_pct",
+            "gps_accel_m_s2",
+            "current_mA",
+            "power_w",
+            "run_cumdist_m",
+            "sample_weight",
+        ]
+    )
     if len(fit) < 10:
         raise ValueError("Not enough samples to fit the empirical strategy model.")
 
@@ -189,7 +212,12 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
     fit["neg_accel_m_s2"] = (-fit["gps_accel_m_s2"]).clip(lower=0.0)
     fit["uphill_grade_pct"] = fit["grade_pct"].clip(lower=0.0)
     fit["downhill_grade_pct"] = (-fit["grade_pct"]).clip(lower=0.0)
-    fit["position_frac"] = fit["run_cumdist_m"] / total_dist
+    if transferable:
+        fit["position_frac"] = 0.0
+    elif fit["model_position_frac"].notna().any():
+        fit["position_frac"] = fit["model_position_frac"].fillna(0.0).clip(0.0, 1.0)
+    else:
+        fit["position_frac"] = fit["run_cumdist_m"] / total_dist
     fit["action"] = fit["gps_accel_m_s2"].map(classify_strategy_action)
     fit["is_accelerate"] = (fit["action"] == ACTION_ACCELERATE).astype(float)
     fit["is_hold"] = (fit["action"] == ACTION_HOLD).astype(float)
@@ -199,8 +227,13 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
     coast_sample_count = int(max(float(fit["is_coast"].sum()), float(coast_like.sum())))
 
     design = _design_matrix(fit)
-    current_coeffs = _solve_ridge(design, fit["current_mA"].to_numpy(dtype=float), ridge)
-    power_coeffs = _solve_ridge(design, fit["power_w"].to_numpy(dtype=float), ridge)
+    weights = fit["sample_weight"].to_numpy(dtype=float)
+    current_coeffs = _solve_ridge(
+        design, fit["current_mA"].to_numpy(dtype=float), ridge, weights=weights
+    )
+    power_coeffs = _solve_ridge(
+        design, fit["power_w"].to_numpy(dtype=float), ridge, weights=weights
+    )
     positive_accel = fit["gps_accel_m_s2"] > max(float(fit["gps_accel_m_s2"].quantile(0.70)), 0.02)
     high_current = fit["current_mA"] > float(fit["current_mA"].quantile(0.75))
     throttle_like = fit[positive_accel | high_current]
@@ -223,6 +256,9 @@ def fit_empirical_energy_model(df: pd.DataFrame, ridge: float = 1e-3) -> dict[st
         "cruise_current_mA": max(cruise_current_mA, 0.0),
         "median_voltage_v": median_voltage_v,
         "coast_sample_count": coast_sample_count,
+        "training_sample_count": int(len(fit)),
+        "training_weight_sum": float(weights.sum()),
+        "transferable": bool(transferable),
     }
 
 
@@ -550,6 +586,34 @@ def optimize_speed_profile(
         return out
 
     low = solve_for_lambda(0.0)
+    if min_time_sec is not None and low.attrs["total_time_s"] < min_time_sec:
+        slow_lambda = -1.0
+        slow = solve_for_lambda(slow_lambda)
+        while slow.attrs["total_time_s"] < min_time_sec and abs(slow_lambda) < 1e6:
+            slow_lambda *= 2.0
+            slow = solve_for_lambda(slow_lambda)
+        if slow.attrs["total_time_s"] < min_time_sec:
+            low.attrs["min_time_constraint_satisfied"] = False
+            return low
+        fast_lambda = 0.0
+        best = slow if slow.attrs["total_time_s"] <= time_budget_sec else low
+        # Strategy speeds are discrete, so a dozen bisection steps are enough
+        # to reach the same profile without multiplying dashboard build time.
+        for _ in range(12):
+            mid_lambda = (slow_lambda + fast_lambda) / 2.0
+            mid = solve_for_lambda(mid_lambda)
+            mid_time = float(mid.attrs["total_time_s"])
+            if mid_time < min_time_sec:
+                fast_lambda = mid_lambda
+            else:
+                slow_lambda = mid_lambda
+                if mid_time <= time_budget_sec:
+                    best = mid
+        if not (min_time_sec <= best.attrs["total_time_s"] <= time_budget_sec):
+            low.attrs["min_time_constraint_satisfied"] = False
+            return low
+        best.attrs["min_time_constraint_satisfied"] = True
+        return best
     if low.attrs["total_time_s"] <= time_budget_sec:
         return low
 
@@ -769,7 +833,20 @@ def _design_matrix(df: pd.DataFrame) -> np.ndarray:
     ])
 
 
-def _solve_ridge(design: np.ndarray, target: np.ndarray, ridge: float) -> np.ndarray:
+def _solve_ridge(
+    design: np.ndarray,
+    target: np.ndarray,
+    ridge: float,
+    *,
+    weights: np.ndarray | None = None,
+) -> np.ndarray:
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if len(weights) != len(design) or not np.isfinite(weights).all() or (weights <= 0).any():
+            raise ValueError("Sample weights must be finite, positive, and match the training rows.")
+        scale = np.sqrt(weights)
+        design = design * scale[:, None]
+        target = target * scale
     penalty = ridge * np.eye(design.shape[1])
     penalty[0, 0] = 0.0
     return np.linalg.solve(design.T @ design + penalty, design.T @ target)
