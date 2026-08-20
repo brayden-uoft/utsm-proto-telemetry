@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" data-mode="simple">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Strategy | UTSM</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/app.css?v=4"></head>
+<body data-page="runs">
+  <main>
+    <section class="page-head"><div><p class="eyebrow">Race strategy</p><h1 id="title">Strategy library</h1><p id="description" class="lede">Open a packaged strategy and see where it came from.</p></div><div class="button-row"><a class="button secondary" href="/strategy">All strategies</a><a class="button ghost" href="/runs">Back to runs</a></div></section>
+    <div id="message" role="status" aria-live="polite"></div>
+    <section id="catalog" class="run-list"></section>
+    <section id="detail" hidden>
+      <article class="card"><span class="badge">Provenance</span><h2>How this strategy was generated</h2><p id="provenance" class="lede"></p></article>
+      <section class="grid grid-2 section">
+        <article class="card"><div class="section-head"><h2>Route and actions</h2><span id="pointCount" class="muted"></span></div><canvas id="route" class="map" aria-label="Strategy route colored by driving action" aria-describedby="routeSummary"></canvas><p id="routeSummary" class="visual-summary"></p></article>
+        <article class="card"><h2>Target speed</h2><canvas id="speed" class="chart" aria-label="Target speed by course distance" aria-describedby="speedSummary"></canvas><p id="speedSummary" class="visual-summary"></p></article>
+      </section>
+      <section class="card section"><div class="section-head"><h2>Strategy files</h2></div><div id="files" class="button-row"></div></section>
+    </section>
+  </main>
+  <script src="/static/shell.js?v=2"></script>
+  <script>
+    const byId=id=>document.getElementById(id),parts=location.pathname.split('/').filter(Boolean),strategyId=parts.length>1?decodeURIComponent(parts[1]):null;
+    function fileLabel(key){return key==='map'?'Download strategy map':key==='firmware'?'Download firmware header':key==='segments'?'Download segment table':'Download strategy report'}
+    function drawLine(canvas,points,value,colors){const ratio=devicePixelRatio||1,width=canvas.clientWidth,height=canvas.clientHeight;canvas.width=width*ratio;canvas.height=height*ratio;const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);ctx.fillStyle='#091522';ctx.fillRect(0,0,width,height);if(points.length<2)return;const values=points.map(value),xs=values.map(item=>item[0]),ys=values.map(item=>item[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys),pad=24,spanX=maxX-minX||1,spanY=maxY-minY||1,toX=x=>pad+(x-minX)/spanX*(width-pad*2),toY=y=>height-pad-(y-minY)/spanY*(height-pad*2);ctx.lineWidth=3;ctx.lineCap='round';for(let index=1;index<points.length;index++){ctx.strokeStyle=colors(points[index]);ctx.beginPath();ctx.moveTo(toX(values[index-1][0]),toY(values[index-1][1]));ctx.lineTo(toX(values[index][0]),toY(values[index][1]));ctx.stroke()}}
+    function draw(samples){drawLine(byId('route'),samples,row=>[row.longitude,row.latitude],row=>row.action==='accelerate'?'#45d6a1':row.action==='coast'?'#ffb24b':'#35a9ff');drawLine(byId('speed'),samples,row=>[row.distance_m,row.target_speed_kph],()=> '#35a9ff');const speeds=samples.map(row=>row.target_speed_kph),actions=[...new Set(samples.map(row=>row.action).filter(Boolean))];byId('routeSummary').textContent=`${samples.length} sampled route points. Green is accelerate, orange is coast, and blue is hold or another action. Actions present: ${actions.join(', ')||'none'}.`;byId('speedSummary').textContent=speeds.length?`Target speed ranges from ${Math.min(...speeds).toFixed(1)} to ${Math.max(...speeds).toFixed(1)} km/h over ${samples.at(-1).distance_m.toFixed(0)} m.`:'No target-speed samples are available.'}
+    async function loadCatalog(){const response=await fetch('/api/strategies'),payload=await response.json();if(!response.ok)throw new Error(payload.detail||'Strategies could not be loaded');const catalog=byId('catalog');catalog.replaceChildren();payload.strategies.forEach(strategy=>{const card=utsm.node('article','card');card.append(utsm.node('span','badge',strategy.available?'Available':'Unavailable'),utsm.node('h2','',strategy.label),utsm.node('p','muted',strategy.description),utsm.node('p','small',strategy.provenance));if(strategy.available){const link=utsm.node('a','button','Open strategy');link.href=strategy.href;card.append(link)}catalog.append(card)})}
+    async function loadDetail(){const response=await fetch(`/api/strategies/${encodeURIComponent(strategyId)}`),payload=await response.json();if(!response.ok)throw new Error(payload.detail||'Strategy could not be loaded');const strategy=payload.strategy;document.title=`${strategy.label} | UTSM`;byId('title').textContent=strategy.label;byId('description').textContent=strategy.description;byId('provenance').textContent=strategy.provenance;byId('pointCount').textContent=`${payload.sample_count} samples`;byId('catalog').hidden=true;byId('detail').hidden=false;const files=byId('files');files.replaceChildren();strategy.files.forEach(key=>{const link=utsm.node('a','button secondary',fileLabel(key));link.href=`/api/strategies/${encodeURIComponent(strategy.id)}/files/${encodeURIComponent(key)}`;files.append(link)});draw(payload.samples);addEventListener('resize',()=>draw(payload.samples),{passive:true})}
+    (strategyId?loadDetail():loadCatalog()).catch(error=>{byId('message').replaceChildren(utsm.node('div','alert error',error.message));byId('catalog').hidden=true;byId('detail').hidden=true;byId('title').textContent='Strategy unavailable'});
+  </script>
+</body></html>

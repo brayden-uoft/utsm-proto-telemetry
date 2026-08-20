@@ -1,4 +1,5 @@
 __pycache__/
+.dashboard-data/
 *.py[cod]
 .venv/
 venv/

@@ -1,120 +1,31 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UTSM Live Car</title>
-  <link rel="preconnect" href="https://unpkg.com">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <style>
-    :root { color-scheme: dark; --bg:#08111f; --panel:#101c2d; --line:#22344d; --muted:#8fa4bf; --blue:#32a7ff; --green:#44d19d; --orange:#ffad42; --red:#ff6174; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:#eef6ff; font:14px/1.4 system-ui,-apple-system,Segoe UI,sans-serif; }
-    header { display:flex; justify-content:space-between; align-items:center; gap:20px; padding:18px 24px; border-bottom:1px solid var(--line); background:#0b1626; position:sticky; top:0; z-index:500; }
-    h1 { margin:0; font-size:20px; letter-spacing:.04em; }
-    .subtitle { color:var(--muted); font-size:12px; margin-top:2px; }
-    .status { display:flex; align-items:center; gap:8px; color:var(--muted); }
-    .header-actions { display:flex; align-items:center; gap:14px; }
-    .dyno-button { border:0; border-radius:8px; padding:10px 14px; background:var(--orange); color:#181006; font-weight:700; cursor:pointer; }
-    .dyno-button:disabled { opacity:.55; cursor:wait; }
-    .dot { width:10px; height:10px; border-radius:50%; background:var(--red); box-shadow:0 0 12px currentColor; }
-    .dot.online { background:var(--green); }
-    main { padding:18px; max-width:1700px; margin:auto; }
-    .gauges { display:grid; grid-template-columns:repeat(6,minmax(150px,1fr)); gap:12px; }
-    .gauge,.panel { background:linear-gradient(145deg,#122137,#0d1828); border:1px solid var(--line); border-radius:12px; }
-    .gauge { padding:14px; }
-    .gauge-label { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.1em; }
-    .gauge-value { font-size:28px; font-variant-numeric:tabular-nums; margin:7px 0; }
-    .bar { height:5px; background:#23354d; border-radius:4px; overflow:hidden; }
-    .bar span { display:block; height:100%; width:0; background:var(--blue); transition:width .25s; }
-    .grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(340px,.8fr); gap:12px; margin-top:12px; }
-    .panel { padding:14px; min-width:0; }
-    .panel h2 { margin:0 0 10px; font-size:13px; color:#caddf1; text-transform:uppercase; letter-spacing:.08em; }
-    .charts { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    .chart-wrap { min-height:180px; border:1px solid #1d3049; border-radius:8px; padding:8px; }
-    .chart-title { color:var(--muted); font-size:11px; margin-bottom:4px; }
-    canvas { display:block; width:100%; height:145px; }
-    #map { height:402px; border-radius:8px; background:#101b28; }
-    .map-wait { position:absolute; z-index:400; margin:12px; padding:7px 10px; background:#08111fd9; border-radius:6px; color:var(--muted); pointer-events:none; }
-    .table-panel { margin-top:12px; overflow:hidden; }
-    .table-scroll { max-height:330px; overflow:auto; }
-    table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
-    th { position:sticky; top:0; background:#132239; color:var(--muted); text-align:right; padding:9px; }
-    th:first-child,td:first-child { text-align:left; }
-    td { text-align:right; padding:7px 9px; border-top:1px solid #1b2d45; white-space:nowrap; }
-    tbody tr:first-child { color:#fff; background:#14263b; }
-    @media (max-width:900px) { .gauges { grid-template-columns:1fr 1fr; } .grid { grid-template-columns:1fr; } }
-    @media (max-width:570px) { header { padding:14px; } main { padding:10px; } .gauges,.charts { grid-template-columns:1fr; } }
-  </style>
-</head>
-<body>
-  <header>
-    <div><h1>UTSM LIVE CAR</h1><div class="subtitle">ESP32-C3 → ESP-NOW → SIM7600 LTE</div></div>
-    <div class="header-actions"><button id="startDyno" class="dyno-button">Start dyno test</button><div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Waiting for telemetry</span></div></div>
-  </header>
+<html lang="en" data-mode="simple">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Live Telemetry | UTSM</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/app.css?v=4"></head>
+<body data-page="live">
   <main>
-    <section class="gauges">
-      <div class="gauge"><div class="gauge-label">Current</div><div class="gauge-value"><span id="currentValue">—</span> A</div><div class="bar"><span id="currentBar"></span></div></div>
-      <div class="gauge"><div class="gauge-label">Voltage</div><div class="gauge-value"><span id="voltageValue">—</span> V</div><div class="bar"><span id="voltageBar"></span></div></div>
-      <div class="gauge"><div class="gauge-label">Power</div><div class="gauge-value"><span id="powerValue">—</span> W</div><div class="bar"><span id="powerBar"></span></div></div>
-      <div class="gauge"><div class="gauge-label">Motor temperature</div><div class="gauge-value"><span id="temperatureValue">—</span> °C</div><div class="bar"><span id="temperatureBar"></span></div></div>
-      <div class="gauge"><div class="gauge-label">Beam-break speed</div><div class="gauge-value"><span id="speedValue">—</span> km/h</div><div class="bar"><span id="speedBar"></span></div></div>
-      <div class="gauge"><div class="gauge-label">Acceleration magnitude</div><div class="gauge-value"><span id="accelValue">—</span> m/s²</div><div class="bar"><span id="accelBar"></span></div></div>
+    <section class="page-head"><div><p class="eyebrow">Live car</p><h1>Live telemetry</h1><p class="lede">The current car state, with clear checks when a signal is missing.</p></div><div class="button-row"><a class="button secondary" href="/dyno">Open dyno test</a></div></section>
+    <section id="liveStatus" class="card status-panel" role="status" aria-live="polite"><span class="status-symbol">…</span><div><h2>Connecting to dashboard</h2><p>Waiting for the live data connection.</p></div></section><p id="liveAge" class="muted small" aria-live="off">No car packet received.</p>
+    <section class="grid grid-4 section" aria-label="Live vehicle values">
+      <article class="card metric"><div class="metric-label">Wheel speed</div><div class="metric-value"><span id="speed">—</span> <span class="metric-unit">km/h</span></div></article>
+      <article class="card metric"><div class="metric-label">Power</div><div class="metric-value"><span id="power">—</span> <span class="metric-unit">W</span></div></article>
+      <article class="card metric"><div class="metric-label">Current</div><div class="metric-value"><span id="current">—</span> <span class="metric-unit">A</span></div></article>
+      <article class="card metric"><div class="metric-label">Motor temperature</div><div class="metric-value"><span id="temperature">—</span> <span class="metric-unit">°C</span></div></article>
     </section>
-    <section class="grid">
-      <div class="panel"><h2>Last 120 live samples</h2><div class="charts">
-        <div class="chart-wrap"><div class="chart-title">Current (A)</div><canvas id="currentChart"></canvas></div>
-        <div class="chart-wrap"><div class="chart-title">Voltage (V)</div><canvas id="voltageChart"></canvas></div>
-        <div class="chart-wrap"><div class="chart-title">Power (W)</div><canvas id="powerChart"></canvas></div>
-        <div class="chart-wrap"><div class="chart-title">Motor temperature (°C)</div><canvas id="temperatureChart"></canvas></div>
-        <div class="chart-wrap"><div class="chart-title">Beam-break speed (km/h)</div><canvas id="speedChart"></canvas></div>
-        <div class="chart-wrap"><div class="chart-title">Acceleration magnitude (m/s²)</div><canvas id="accelChart"></canvas></div>
-      </div></div>
-      <div class="panel" style="position:relative"><h2>Live position</h2><div id="mapWait" class="map-wait">Waiting for GPS fields from firmware</div><div id="map"></div></div>
-    </section>
-    <section class="panel table-panel"><h2>Live CSV rows</h2><div class="table-scroll"><table><thead><tr>
-      <th>Received</th><th>Seq</th><th>timestamp_ms</th><th>motor_temperature_C</th><th>wheel_speed_kph</th><th>current_mA</th><th>voltage_mV</th><th>ax_x100</th><th>ay_x100</th><th>az_x100</th><th>amag_x100</th><th>Latitude</th><th>Longitude</th>
-    </tr></thead><tbody id="rows"></tbody></table></div></section>
+    <section class="section split"><div><div class="section-head"><h2>Live position</h2><span id="gpsLabel" class="muted">Waiting for GPS</span></div><canvas id="liveMap" class="map" aria-label="Live GPS trail" aria-describedby="liveMapSummary"></canvas><p id="liveMapSummary" class="visual-summary">No GPS points have arrived.</p></div><article class="card"><h2>What to check</h2><ol class="muted"><li>Turn on the car C3 logger.</li><li>Confirm the WROVER relay is online.</li><li>Move the GPS antenna outside for a position lock.</li></ol><p id="packetDetails" class="small muted">No car packet received.</p></article></section>
+    <section class="section" data-advanced><div class="section-head"><h2>Advanced live detail</h2><span class="muted">Last 120 car samples</span></div><div class="grid grid-2"><article class="card"><h3>Current</h3><canvas id="currentChart" class="chart" aria-label="Recent current chart" aria-describedby="liveChartSummary"></canvas></article><article class="card"><h3>Power</h3><canvas id="powerChart" class="chart" aria-label="Recent power chart" aria-describedby="liveChartSummary"></canvas></article><article class="card"><h3>Temperature</h3><canvas id="temperatureChart" class="chart" aria-label="Recent motor temperature chart" aria-describedby="liveChartSummary"></canvas></article><article class="card"><h3>Wheel speed</h3><canvas id="speedChart" class="chart" aria-label="Recent wheel speed chart" aria-describedby="liveChartSummary"></canvas></article></div><p id="liveChartSummary" class="visual-summary">No car samples are available for the charts.</p><div class="section"><div class="table-frame"><table><caption>Latest raw car telemetry</caption><thead><tr><th scope="col">Received</th><th scope="col">Sequence</th><th scope="col">Current mA</th><th scope="col">Voltage mV</th><th scope="col">Power W</th><th scope="col">Temperature °C</th><th scope="col">Speed km/h</th><th scope="col">Latitude</th><th scope="col">Longitude</th></tr></thead><tbody id="liveRows"></tbody></table></div></div></section>
   </main>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/shell.js?v=2"></script>
   <script>
-    const samples=[]; const maxSamples=120; let lastRecordAt=0; let marker=null; let trail=null; const trailPoints=[];
-    const map=L.map('map').setView([39.79917,-86.23801],15);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
-    function fmt(value,digits=2){return Number.isFinite(value)?value.toFixed(digits):'—'}
-    function setGauge(id,value,max){const valid=Number.isFinite(value);document.getElementById(id+'Value').textContent=fmt(value);document.getElementById(id+'Bar').style.width=(valid?Math.min(100,Math.max(0,Math.abs(value)/max*100)):0)+'%'}
-    function drawChart(id,values,color){
-      const c=document.getElementById(id), dpr=devicePixelRatio||1, w=c.clientWidth, h=c.clientHeight; c.width=w*dpr;c.height=h*dpr;
-      const x=c.getContext('2d');x.scale(dpr,dpr);x.clearRect(0,0,w,h);x.strokeStyle='#213650';x.lineWidth=1;
-      for(let i=0;i<4;i++){const y=8+i*(h-16)/3;x.beginPath();x.moveTo(0,y);x.lineTo(w,y);x.stroke()}
-      if(values.length<2)return; let lo=Math.min(...values), hi=Math.max(...values); if(lo===hi){lo-=1;hi+=1} const pad=(hi-lo)*.12;lo-=pad;hi+=pad;
-      x.strokeStyle=color;x.lineWidth=2;x.beginPath();values.forEach((v,i)=>{const px=i/(maxSamples-1)*w,py=h-8-(v-lo)/(hi-lo)*(h-16);i?x.lineTo(px,py):x.moveTo(px,py)});x.stroke();
-      x.fillStyle='#8fa4bf';x.font='10px system-ui';x.fillText(hi.toFixed(1),4,11);x.fillText(lo.toFixed(1),4,h-3);
-    }
-    function redraw(){drawChart('currentChart',samples.map(r=>r.current_mA/1000),'#ff6174');drawChart('voltageChart',samples.map(r=>r.voltage_mV/1000),'#32a7ff');drawChart('powerChart',samples.map(r=>r.power_W),'#ffad42');drawChart('temperatureChart',samples.filter(r=>r.motor_temperature_valid&&Number.isFinite(r.motor_temperature_C)).map(r=>r.motor_temperature_C),'#ff7fd1');drawChart('speedChart',samples.filter(r=>r.wheel_speed_valid&&Number.isFinite(r.wheel_speed_kph)).map(r=>r.wheel_speed_kph),'#b98cff');drawChart('accelChart',samples.map(r=>r.acceleration_mps2),'#44d19d')}
-    function addRow(r){const tr=document.createElement('tr');const gps=v=>v==null?'—':Number(v).toFixed(7),temperature=r.motor_temperature_valid&&Number.isFinite(r.motor_temperature_C)?Number(r.motor_temperature_C).toFixed(2):'—',speed=r.wheel_speed_valid&&Number.isFinite(r.wheel_speed_kph)?Number(r.wheel_speed_kph).toFixed(2):'—';tr.innerHTML=`<td>${new Date(r.received_at).toLocaleTimeString()}</td><td>${r.sequence}</td><td>${r.timestamp_ms}</td><td>${temperature}</td><td>${speed}</td><td>${r.current_mA}</td><td>${r.voltage_mV}</td><td>${r.ax_x100}</td><td>${r.ay_x100}</td><td>${r.az_x100}</td><td>${r.amag_x100}</td><td>${gps(r.latitude)}</td><td>${gps(r.longitude)}</td>`;const body=document.getElementById('rows');body.prepend(tr);while(body.children.length>100)body.lastChild.remove()}
-    function accept(r,history=false){
-      if((r.source_type||'car')!=='car')return;
-      samples.push(r);while(samples.length>maxSamples)samples.shift();lastRecordAt=Date.now();
-      setGauge('current',r.current_mA/1000,20);setGauge('voltage',r.voltage_mV/1000,30);setGauge('power',r.power_W,600);setGauge('temperature',r.motor_temperature_valid&&r.motor_temperature_C!=null?Number(r.motor_temperature_C):NaN,120);setGauge('speed',r.wheel_speed_valid&&r.wheel_speed_kph!=null?Number(r.wheel_speed_kph):NaN,60);setGauge('accel',r.acceleration_mps2,20);addRow(r);
-      if(r.latitude!=null&&r.longitude!=null){const p=[r.latitude,r.longitude];document.getElementById('mapWait').style.display='none';if(!marker){marker=L.circleMarker(p,{radius:8,color:'#fff',fillColor:'#32a7ff',fillOpacity:1}).addTo(map);trail=L.polyline([],{color:'#44d19d',weight:3}).addTo(map);map.setView(p,17)}else marker.setLatLng(p);trailPoints.push(p);while(trailPoints.length>500)trailPoints.shift();trail.setLatLngs(trailPoints);if(!history)map.panTo(p,{animate:true})}
-      redraw();
-    }
-    function connect(){const scheme=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${scheme}://${location.host}/ws/live`);
-      ws.onopen=()=>{document.getElementById('statusText').textContent='Connected; waiting for car';};
-      ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='snapshot'){m.records.slice(-maxSamples).forEach(r=>accept(r,true))}else if(m.type==='telemetry')accept(m.record)};
-      ws.onclose=()=>{document.getElementById('statusDot').classList.remove('online');document.getElementById('statusText').textContent='Dashboard disconnected; retrying';setTimeout(connect,1500)};
-    }
-    setInterval(()=>{const age=(Date.now()-lastRecordAt)/1000,online=lastRecordAt&&age<5;document.getElementById('statusDot').classList.toggle('online',online);document.getElementById('statusText').textContent=lastRecordAt?(online?`Live · ${age.toFixed(1)}s ago`:`Car stale · ${age.toFixed(0)}s ago`):'Waiting for telemetry'},500);
-    addEventListener('resize',redraw);connect();
-    document.getElementById('startDyno').addEventListener('click',async event=>{
-      const button=event.currentTarget;button.disabled=true;button.textContent='Starting...';
-      try{
-        const response=await fetch('/api/dyno-tests/start',{method:'POST'});
-        if(!response.ok&&response.status!==409)throw new Error(`Start failed (${response.status})`);
-        location.href='/dyno';
-      }catch(error){button.disabled=false;button.textContent='Start dyno test';alert(error.message)}
-    });
+    const statusBox=document.getElementById('liveStatus'),samples=[],trail=[];let socket=null,reconnectTimer=null,wsConnected=false,lastCarAt=0,lastCar=null,lastStatusKey='connecting';
+    const fmt=(value,digits=1)=>value==null||!Number.isFinite(Number(value))?'—':Number(value).toFixed(digits);
+    function setStatus(key,kind,title,message){if(key===lastStatusKey)return;lastStatusKey=key;statusBox.replaceChildren();const icon=utsm.node('span',`status-symbol ${kind}`,kind==='live'?'✓':kind==='error'?'!':'…'),text=utsm.node('div');text.append(utsm.node('h2','',title),utsm.node('p','',message));statusBox.append(icon,text)}
+    function accept(record){if((record.source_type||'car')!=='car')return;lastCar=record;lastCarAt=new Date(record.received_at).getTime();samples.push(record);while(samples.length>120)samples.shift();if(record.latitude!=null&&record.longitude!=null){trail.push([Number(record.latitude),Number(record.longitude)]);while(trail.length>500)trail.shift()}document.getElementById('speed').textContent=record.wheel_speed_valid?fmt(record.wheel_speed_kph,1):'—';document.getElementById('power').textContent=fmt(record.power_W,1);document.getElementById('current').textContent=fmt(record.current_mA/1000,2);document.getElementById('temperature').textContent=record.motor_temperature_valid?fmt(record.motor_temperature_C,1):'—';document.getElementById('packetDetails').textContent=`Device ${record.device_id} · packet ${record.sequence} · ${new Date(record.received_at).toLocaleTimeString()}`;renderRows();renderVisuals()}
+    function renderStatus(){const age=lastCarAt?(Date.now()-lastCarAt)/1000:null;document.getElementById('liveAge').textContent=age==null?'No car packet received.':`Latest car packet age: ${age.toFixed(1)} seconds.`;if(!wsConnected){setStatus('disconnected','error','Dashboard disconnected, retrying','Check that the dashboard service is running and this computer is connected.');return}if(!lastCar){setStatus('waiting','','Dashboard connected, waiting for car','Turn on the car logger and WROVER relay.');return}if(age>=8){setStatus('stale','error','Car signal was lost','Check the C3 logger, relay, and LTE connection.');return}if(lastCar.latitude==null||lastCar.longitude==null){setStatus('no-gps','','Car live, GPS not available','Telemetry is arriving. Move the antenna outside and check the GPS connection.');return}setStatus('live','live','Car telemetry and GPS are live','Current telemetry and position are available.')}
+    function connect(){if(socket&&(socket.readyState===WebSocket.OPEN||socket.readyState===WebSocket.CONNECTING))return;const scheme=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(`${scheme}://${location.host}/ws/live`);socket.onopen=()=>{wsConnected=true;if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null}renderStatus()};socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.type==='snapshot')message.records.slice(-120).forEach(accept);else if(message.type==='telemetry')accept(message.record);renderStatus()};socket.onerror=()=>socket.close();socket.onclose=()=>{wsConnected=false;socket=null;renderStatus();if(!reconnectTimer)reconnectTimer=setTimeout(()=>{reconnectTimer=null;connect()},1500)}}
+    function renderRows(){const table=document.getElementById('liveRows');table.replaceChildren();samples.slice(-50).reverse().forEach(record=>{const row=document.createElement('tr'),values=[new Date(record.received_at).toLocaleTimeString(),record.sequence,record.current_mA,record.voltage_mV,fmt(record.power_W,1),record.motor_temperature_valid?fmt(record.motor_temperature_C,1):'—',record.wheel_speed_valid?fmt(record.wheel_speed_kph,1):'—',fmt(record.latitude,7),fmt(record.longitude,7)];values.forEach(value=>{const cell=document.createElement('td');cell.textContent=value;row.append(cell)});table.append(row)})}
+    function lineChart(id,values,color){const canvas=document.getElementById(id);if(!canvas||canvas.offsetParent===null)return;const ratio=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;canvas.width=w*ratio;canvas.height=h*ratio;const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);ctx.clearRect(0,0,w,h);const clean=values.filter(Number.isFinite);if(clean.length<2)return;const min=Math.min(...clean),max=Math.max(...clean),span=max-min||1;ctx.strokeStyle='#263a55';ctx.beginPath();for(let i=0;i<5;i++){const y=15+i*(h-30)/4;ctx.moveTo(8,y);ctx.lineTo(w-8,y)}ctx.stroke();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();values.forEach((value,index)=>{if(!Number.isFinite(value))return;const x=8+index/Math.max(values.length-1,1)*(w-16),y=h-15-(value-min)/span*(h-30);index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
+    function drawMap(){const canvas=document.getElementById('liveMap'),ratio=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;canvas.width=w*ratio;canvas.height=h*ratio;const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);ctx.fillStyle='#091522';ctx.fillRect(0,0,w,h);if(!trail.length){ctx.fillStyle='#9babc1';ctx.font='15px system-ui';ctx.textAlign='center';ctx.fillText('GPS position will appear here',w/2,h/2);document.getElementById('gpsLabel').textContent='Waiting for GPS';document.getElementById('liveMapSummary').textContent='No GPS points have arrived.';return}let minLat=Infinity,maxLat=-Infinity,minLon=Infinity,maxLon=-Infinity;trail.forEach(([lat,lon])=>{minLat=Math.min(minLat,lat);maxLat=Math.max(maxLat,lat);minLon=Math.min(minLon,lon);maxLon=Math.max(maxLon,lon)});const spanX=Math.max(maxLon-minLon,1e-6),spanY=Math.max(maxLat-minLat,1e-6),pad=30,scale=Math.min((w-pad*2)/spanX,(h-pad*2)/spanY);ctx.strokeStyle='#45d6a1';ctx.lineWidth=3;ctx.beginPath();trail.forEach(([lat,lon],i)=>{const x=w/2+(lon-(minLon+maxLon)/2)*scale,y=h/2-(lat-(minLat+maxLat)/2)*scale;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();const [lat,lon]=trail.at(-1),x=w/2+(lon-(minLon+maxLon)/2)*scale,y=h/2-(lat-(minLat+maxLat)/2)*scale;ctx.fillStyle='#35a9ff';ctx.beginPath();ctx.arc(x,y,7,0,Math.PI*2);ctx.fill();document.getElementById('gpsLabel').textContent=`${lat.toFixed(6)}, ${lon.toFixed(6)}`;document.getElementById('liveMapSummary').textContent=`Live trail contains ${trail.length} GPS points. Current position is ${lat.toFixed(6)}, ${lon.toFixed(6)}.`}
+    function renderVisuals(){drawMap();lineChart('currentChart',samples.map(r=>r.current_mA/1000),'#35a9ff');lineChart('powerChart',samples.map(r=>Number(r.power_W)),'#ffb24b');lineChart('temperatureChart',samples.map(r=>r.motor_temperature_valid?Number(r.motor_temperature_C):NaN),'#ff6b79');lineChart('speedChart',samples.map(r=>r.wheel_speed_valid?Number(r.wheel_speed_kph):NaN),'#45d6a1');const latest=samples.at(-1);document.getElementById('liveChartSummary').textContent=latest?`${samples.length} recent car samples. Latest current ${fmt(latest.current_mA/1000,2)} A, power ${fmt(latest.power_W)} W, temperature ${latest.motor_temperature_valid?fmt(latest.motor_temperature_C):'not available'} °C, wheel speed ${latest.wheel_speed_valid?fmt(latest.wheel_speed_kph):'not available'} km/h.`:'No car samples are available for the charts.'}
+    document.addEventListener('utsm-mode-change',renderVisuals);addEventListener('resize',renderVisuals,{passive:true});setInterval(renderStatus,500);connect();drawMap();
   </script>
-</body>
-</html>
+</body></html>
