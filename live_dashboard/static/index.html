@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-mode="simple">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UTSM Dashboard</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/app.css?v=4"></head>
+<body data-page="home">
+  <main>
+    <section class="page-head"><div><p class="eyebrow">Race operations</p><h1>What do you want to do?</h1><p class="lede">Live car data, saved runs, imports, and dyno testing all start here.</p></div></section>
+    <section class="grid grid-4" aria-label="Main dashboard actions">
+      <a class="card action-card" href="/live"><span class="action-icon" aria-hidden="true">●</span><h2>Watch live telemetry</h2><p>See car status, speed, power, temperature, and position.</p><span class="action-go">Open live dashboard</span></a>
+      <a class="card action-card" href="/import"><span class="action-icon" aria-hidden="true">↑</span><h2>Import a run</h2><p>Add CSV, ZIP, or GPX data from your computer or the car SD card.</p><span class="action-go">Choose run files</span></a>
+      <a class="card action-card" href="/runs"><span class="action-icon" aria-hidden="true">≡</span><h2>Browse past runs</h2><p>Find previous data, open charts, view raw rows, and download originals.</p><span class="action-go">Open run library</span></a>
+      <a class="card action-card" href="/dyno"><span class="action-icon" aria-hidden="true">⚡</span><h2>Open dyno test</h2><p>Compare vehicle input energy with dyno output energy.</p><span class="action-go">Open dyno dashboard</span></a>
+    </section>
+    <section class="section grid grid-2">
+      <div><div class="section-head"><h2>System status</h2><a class="button ghost" href="/live">Open live</a></div><div id="systemStatus" class="card status-panel" role="status" aria-live="polite"><span class="status-symbol">…</span><div><h2>Checking dashboard</h2><p>Connecting to the local dashboard service.</p></div></div><p id="systemAge" class="muted small" aria-live="off">No car packet received.</p></div>
+      <div><div class="section-head"><h2>Recent runs</h2><a class="button ghost" href="/runs">View all</a></div><div id="recentRuns" class="run-list"><div class="card muted">Loading saved runs…</div></div></div>
+    </section>
+  </main>
+  <script src="/static/shell.js?v=2"></script>
+  <script>
+    const statusBox=document.getElementById('systemStatus'),statusAge=document.getElementById('systemAge'),recent=document.getElementById('recentRuns');let lastStatusKey='';
+    function setStatus(key,kind,title,message){if(key===lastStatusKey)return;lastStatusKey=key;statusBox.replaceChildren();const icon=utsm.node('span',`status-symbol ${kind}`,kind==='live'?'✓':kind==='error'?'!':'…');const text=utsm.node('div');text.append(utsm.node('h2','',title),utsm.node('p','',message));statusBox.append(icon,text)}
+    async function load(){
+      try{
+        const [statusResponse,runsResponse]=await Promise.all([fetch('/api/status'),fetch('/api/runs')]);
+        if(!statusResponse.ok||!runsResponse.ok)throw new Error('Dashboard request failed');
+        const status=await statusResponse.json(),runPayload=await runsResponse.json(),runs=runPayload.runs;
+        const car=status.latest.car;
+        if(!car){setStatus('waiting','','Dashboard connected, waiting for car','Turn on the car logger and LTE relay. The dashboard is ready.');statusAge.textContent='No car packet received.'}
+        else {const age=(Date.now()-new Date(car.received_at).getTime())/1000;statusAge.textContent=`Latest car packet: ${age.toFixed(1)} seconds ago.`;if(age<8)setStatus('live','live','Car telemetry is live','Live packets are reaching the dashboard.');else setStatus('stale','error','Car signal was lost','Check the car C3, relay, and LTE connection.');}
+        recent.replaceChildren();
+        if(!runs.length){const box=utsm.node('div','empty');box.append(utsm.node('p','',runPayload.uploaded_locked?'Uploaded runs are locked. Unlock them on Import.':'No saved runs yet.'),Object.assign(utsm.node('a','button',runPayload.uploaded_locked?'Unlock runs':'Import your first run'),{href:'/import?unlock=1'}));recent.append(box);return}
+        runs.slice(0,3).forEach(run=>{const link=utsm.node('a','card action-card');link.href=`/runs/${encodeURIComponent(run.id)}`;link.style.minHeight='0';link.append(utsm.node('span',`badge ${run.analysis_ready?'ready':'raw'}`,run.status),utsm.node('h2','',run.label),utsm.node('p','muted small',`${utsm.formatDate(run.date)} · ${run.csv_count} CSV file${run.csv_count===1?'':'s'}`));recent.append(link)});
+      }catch(error){statusAge.textContent='Status age unavailable.';setStatus('disconnected','error','Dashboard disconnected','Start or restart the dashboard service, then reload this page.');recent.replaceChildren(utsm.node('div','alert error','Saved runs could not be loaded. Try reloading.'));}
+    }
+    load();setInterval(load,5000);
+  </script>
+</body></html>

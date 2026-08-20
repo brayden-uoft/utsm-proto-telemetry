@@ -3,4 +3,7 @@ numpy
 pandas
 pyserial
 fastapi
+defusedxml
+httpx
+python-multipart
 uvicorn[standard]

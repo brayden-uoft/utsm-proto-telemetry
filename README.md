@@ -306,35 +306,68 @@ python simulate_speed_strategy.py data\runs\afternoon-run\Utsm-2.gpx data\runs\a
 - MPU dynamic acceleration is useful for diagnostics, but sensor orientation and gravity compensation are still imperfect without gyro fusion or a known mounting calibration.
 - Generated outputs, caches, and local scratch artifacts should stay out of Git.
 
-## Live LTE Dashboard
+## Unified Telemetry Dashboard
 
-The live page is separate from the generated historical replay dashboard. It
-runs a small FastAPI server that accepts one telemetry record at a time, keeps
-the most recent records in memory, and sends them to connected browsers over a
-WebSocket.
+The FastAPI dashboard is the single entry point for live telemetry, saved runs,
+browser imports, raw CSV review, and dyno testing. Live records remain in memory.
+Packaged runs are read-only inputs under `data/runs`. Browser and SD card imports
+are written under the ignored `.dashboard-data/runs` folder, so they remain
+available after the server restarts without changing packaged data. Reference
+geometry under `data/tracks` remains separate and is never treated as recorded
+run data. Set `UTSM_DASHBOARD_DATA_DIR` to move writable dashboard storage.
 
 Start it in PowerShell:
 
 ```powershell
 $env:UTSM_TELEMETRY_API_KEY = "replace-this-for-real-tests"
+$env:UTSM_DASHBOARD_OPERATOR_KEY = "replace-this-for-run-imports"
 python -m uvicorn live_dashboard.app:app --host 0.0.0.0 --port 8000
 ```
 
-Open `http://127.0.0.1:8000/live`. Test the complete page without hardware in a
+Open `http://127.0.0.1:8000/`. The home page links to every dashboard function.
+Test the live page without hardware in a
 second PowerShell window:
 
 ```powershell
 python send_live_test.py --api-key "replace-this-for-real-tests" --gps
 ```
 
-The page includes:
+The dashboard includes:
 
-- current, voltage, power, motor temperature, beam-break speed, and acceleration gauges
-- six rolling live charts
-- a table preserving the current telemetry CSV column names
-- an optional live map and trail when latitude/longitude arrive
-- a stale-data indicator when the car has not reported for five seconds
-- a **Start dyno test** button that opens the live efficiency page
+- shared Home, Live, Runs, Import, and Dyno navigation
+- a searchable library of packaged and imported past runs
+- browser import for CSV, ZIP, GPX plus CSV, and an approved SD-card folder
+- an integrated raw CSV table with filtering, sorting, columns, and pagination
+- explicit Data, Charts, Replay, Strategy, and Compare actions with a reason when
+  a run does not contain the required data
+- an integrated two-run comparison and lightweight GPS replay
+- actionable live connection, car freshness, and GPS status
+- a persistent Simple or Advanced detail setting, with Simple as the default
+
+Run imports and imported run contents require the separate operator key. The
+dashboard fails closed when `UTSM_DASHBOARD_OPERATOR_KEY` is unset. Enter the
+key once on the Import page to create an eight-hour SameSite, HttpOnly browser
+session. The key must contain at least 16 characters, and failed unlock attempts
+are rate limited. Before unlock, the catalog shows packaged runs and only a
+metadata-free count of locked uploads. Imported run names, IDs, dates,
+capabilities, CSV, GPX, replay, comparison, and downloads all require the
+operator session.
+
+Every original upload is stored unchanged once in
+`.dashboard-data/blobs/<sha256>`. Generated opaque filenames are used on disk;
+the original display name, byte size, SHA256 digest, import time, and source are
+kept in `run.json` and used for downloads. Imported canonical CSV and GPX files
+live in `.dashboard-data/runs/<opaque-run-id>`. ZIPs are checked for traversal,
+case collisions, reserved names, links, non-regular entries, encryption,
+compression bombs, resource limits, integrity errors, and supported file types
+before a run is committed. CSV and GPX inputs also have byte, row, column,
+point, XML entity, and XML depth limits.
+
+Imports use an operating-system file lock, so separate Uvicorn workers cannot
+write the run library at the same time. A pending batch marker keeps every run
+from a multi-session firmware import out of the catalog until the whole batch
+has committed. Original firmware sources are content addressed and referenced
+by each generated run instead of being copied once per session.
 
 ### Importing firmware CSVs with embedded GPS
 

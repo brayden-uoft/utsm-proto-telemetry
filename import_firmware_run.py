@@ -8,13 +8,13 @@ import math
 import os
 import re
 import tempfile
-import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import pandas as pd
 
 from utsm_telemetry import add_xy, compute_distance, find_lap_boundaries_by_start_gate
+from utsm_telemetry.safe_archive import safe_extract_zip
 
 
 GPS_COLUMNS = {
@@ -78,8 +78,7 @@ def csv_paths(input_path: Path, extracted_dir: Path | None = None) -> list[Path]
     if input_path.suffix.lower() == ".zip":
         if extracted_dir is None:
             raise ValueError("A ZIP extraction directory is required.")
-        with zipfile.ZipFile(input_path) as archive:
-            archive.extractall(extracted_dir)
+        safe_extract_zip(input_path, extracted_dir, allowed_extensions={".csv"})
         return sorted(extracted_dir.rglob("*.csv"))
     if input_path.is_dir():
         return sorted(input_path.glob("*.csv"))
